@@ -36,9 +36,11 @@ mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
   const char *conninfo = "";
   mrb_get_args(mrb, "|z", &conninfo);
 
+  errno = 0;
   PGconn *conn = PQconnectdb(conninfo);
   if (PQstatus(conn) != CONNECTION_OK) {
-    mrb_sys_fail(mrb, PQerrorMessage(conn));
+    if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
+    mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), PQerrorMessage(conn));
   }
 
   mrb_data_init(self, conn, &mrb_PGconn_type);
@@ -149,7 +151,7 @@ mrb_PQftable(mrb_state *mrb, mrb_value self)
 
   Oid foo = PQftable((const PGresult *) DATA_PTR(self), column_number);
   if (foo == InvalidOid) {
-    mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "InvalidOid"), "column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
+    mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "InvalidOid"), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
   return mrb_fixnum_value(foo);
@@ -179,22 +181,23 @@ mrb_PQgetvalue(mrb_state *mrb, mrb_value self)
   mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
   const PGresult *result = (const PGresult *) DATA_PTR(self);
 
+  errno = 0;
   char *value = PQgetvalue(result, row_number, column_number);
   if (value) {
     if (strlen(value) == 0 && PQgetisnull(result, row_number, column_number)) {
-      return mrb_const_get(mrb, mrb_obj_value(mrb_obj_class(mrb, self)), mrb_intern_lit(mrb, "NULL"));
+      return mrb_symbol_value(mrb_intern_lit(mrb, "NULL"));
     } else {
       switch(PQftype(result, column_number)) {
-        case 16: {
-          return mrb_bool_value(strncmp(value, "t", 1) == 0);
+        case 16: { // boolean
+          return mrb_bool_value(value[0] == 't');
         } break;
-        case 20:
+        case 20: // Integers
         case 21:
         case 23:
         case 26: {
           return mrb_str_to_inum(mrb, mrb_str_new_static(mrb, value, PQgetlength(result, row_number, column_number)), 0, TRUE);
         } break;
-        case 700:
+        case 700: // Floats
         case 701: {
           return mrb_float_value(mrb, mrb_str_to_dbl(mrb, mrb_str_new_static(mrb, value, PQgetlength(result, row_number, column_number)), TRUE));
         } break;
