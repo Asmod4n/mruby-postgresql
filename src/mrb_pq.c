@@ -7,6 +7,7 @@
 #include <mruby/class.h>
 #include <mruby/error.h>
 #include <mruby/variable.h>
+#include <mruby/throw.h>
 #include <string.h>
 #include <errno.h>
 
@@ -36,16 +37,50 @@ mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
   const char *conninfo = "";
   mrb_get_args(mrb, "|z", &conninfo);
 
+  struct mrb_jmpbuf* prev_jmp = mrb->jmp;
+  struct mrb_jmpbuf c_jmp;
+  PGconn *conn;
+  MRB_TRY(&c_jmp)
+  {
+      mrb->jmp = &c_jmp;
+      errno = 0;
+      conn = PQconnectdb(conninfo);
+      if (PQstatus(conn) != CONNECTION_OK) {
+        if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
+        mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), PQerrorMessage(conn));
+      }
+      mrb_data_init(self, conn, &mrb_PGconn_type);
+      mrb->jmp = prev_jmp;
+  }
+  MRB_CATCH(&c_jmp)
+  {
+      mrb->jmp = prev_jmp;
+      PQfinish(conn);
+      MRB_THROW(mrb->jmp);
+  }
+  MRB_END_EXC(&c_jmp);
+
+  return self;
+}
+
+static mrb_value
+mrb_PQreset(mrb_state *mrb, mrb_value self)
+{
   errno = 0;
-  PGconn *conn = PQconnectdb(conninfo);
+  PGconn *conn = (PGconn *) DATA_PTR(self);
+  PQreset(conn);
   if (PQstatus(conn) != CONNECTION_OK) {
     if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
     mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), PQerrorMessage(conn));
   }
 
-  mrb_data_init(self, conn, &mrb_PGconn_type);
-
   return self;
+}
+
+static mrb_value
+mrb_PQsocket(mrb_state *mrb, mrb_value self)
+{
+  return mrb_fixnum_value(mrb, PQsocket((const PGconn *) DATA_PTR(self)));
 }
 
 static mrb_value
@@ -61,10 +96,19 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
   if (nParams) {
     const char *paramValues[nParams];
     for (mrb_int i = 0; i < nParams; i++) {
-      if (mrb_test(paramValues_val[i])) {
-        paramValues[i] = mrb_string_value_cstr(mrb, &paramValues_val[i]);
-      } else {
-        paramValues[i] = NULL;
+      switch(mrb_type(paramValues_val[i])) {
+        case MRB_TT_TRUE:
+          paramValues[i] = "t";
+        break;
+        case MRB_TT_FALSE: {
+          if (!mrb_fixnum(paramValues_val[i])) {
+            paramValues[i] = NULL;
+          } else {
+            paramValues[i] = "f";
+          }
+        } break;
+        default:
+          paramValues[i] = mrb_string_value_cstr(mrb, &paramValues_val[i]);
       }
     }
     res = PQexecParams((PGconn *) DATA_PTR(self), command, nParams, NULL, paramValues, NULL, NULL, 0);
@@ -72,25 +116,39 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
     res = PQexecParams((PGconn *) DATA_PTR(self), command, nParams, NULL, NULL, NULL, NULL, 0);
   }
   if (res) {
-    switch(PQresultStatus(res)) {
-      case PGRES_TUPLES_OK:
-      case PGRES_SINGLE_TUPLE: {
-        mrb_value res_val = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result")));
-        mrb_data_init(res_val, res, &mrb_PGresult_type);
+    struct mrb_jmpbuf* prev_jmp = mrb->jmp;
+    struct mrb_jmpbuf c_jmp;
 
-        return res_val;
-      } break;
-      case PGRES_EMPTY_QUERY:
-      case PGRES_BAD_RESPONSE:
-      case PGRES_NONFATAL_ERROR:
-      case PGRES_FATAL_ERROR: {
-        PQclear(res);
-        mrb_sys_fail(mrb, PQresultErrorMessage(res));
-      } break;
-      default: {
-        PQclear(res);
-      }
+    MRB_TRY(&c_jmp)
+    {
+        mrb->jmp = &c_jmp;
+        switch(PQresultStatus(res)) {
+          case PGRES_TUPLES_OK:
+          case PGRES_SINGLE_TUPLE: {
+            mrb_value res_val = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result")));
+            mrb_data_init(res_val, res, &mrb_PGresult_type);
+            return res_val;
+          } break;
+          case PGRES_EMPTY_QUERY:
+          case PGRES_BAD_RESPONSE:
+          case PGRES_NONFATAL_ERROR:
+          case PGRES_FATAL_ERROR: {
+            if (errno) mrb_sys_fail(mrb, PQresultErrorMessage(res));
+            mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), PQresultErrorMessage(res));
+          } break;
+          default: {
+            PQclear(res);
+          }
+        }
+        mrb->jmp = prev_jmp;
     }
+    MRB_CATCH(&c_jmp)
+    {
+        mrb->jmp = prev_jmp;
+        PQclear(res);
+        MRB_THROW(mrb->jmp);
+    }
+    MRB_END_EXC(&c_jmp);
   } else if (errno) {
     mrb_sys_fail(mrb, PQresultErrorMessage(res));
   } else {
@@ -166,7 +224,7 @@ mrb_PQftablecol(mrb_state *mrb, mrb_value self)
 
   int foo = PQftablecol((const PGresult *) DATA_PTR(self), column_number);
   if (foo == 0) {
-    mrb_raise(mrb, E_RUNTIME_ERROR, "column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
+    mrb_raise(mrb, E_RUNTIME_ERROR, "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
   return mrb_fixnum_value(foo);
@@ -239,6 +297,9 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
   mrb_define_method(mrb, pq_class, "initialize",  mrb_PQconnectdb, MRB_ARGS_OPT(1));
   mrb_define_method(mrb, pq_class, "exec",  mrb_PQexecParams, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
+  mrb_define_method(mrb, pq_class, "reset",  mrb_PQreset, MRB_ARGS_NONE());
+  mrb_define_method(mrb, pq_class, "socket",  mrb_PQsocket, MRB_ARGS_NONE());
+  mrb_define_alias (mrb, pq_class, "to_i", "socket");
   mrb_define_method(mrb, pq_class, "set_single_row_mode",  mrb_PQsetSingleRowMode, MRB_ARGS_NONE());
   pq_result_class = mrb_define_class_under(mrb, pq_class, "Result", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_result_class, MRB_TT_DATA);
