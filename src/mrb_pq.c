@@ -80,7 +80,7 @@ mrb_PQreset(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_PQsocket(mrb_state *mrb, mrb_value self)
 {
-  return mrb_fixnum_value(mrb, PQsocket((const PGconn *) DATA_PTR(self)));
+  return mrb_fixnum_value(PQsocket((const PGconn *) DATA_PTR(self)));
 }
 
 static mrb_value
@@ -149,6 +149,8 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
         MRB_THROW(mrb->jmp);
     }
     MRB_END_EXC(&c_jmp);
+
+    return self;
   } else if (errno) {
     mrb_sys_fail(mrb, PQresultErrorMessage(res));
   } else {
