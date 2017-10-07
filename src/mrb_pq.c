@@ -80,7 +80,13 @@ mrb_PQreset(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_PQsocket(mrb_state *mrb, mrb_value self)
 {
-  return mrb_fixnum_value(PQsocket((const PGconn *) DATA_PTR(self)));
+  const PGconn *conn = (const PGconn *) DATA_PTR(self);
+  int socket = PQsocket(conn);
+  if (socket == -1) {
+    if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
+    mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), PQerrorMessage(conn));
+  }
+  return mrb_fixnum_value(socket);
 }
 
 static mrb_value
