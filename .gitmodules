@@ -1,0 +1,3 @@
+[submodule "deps/postgresql"]
+	path = deps/postgresql
+	url = https://git.postgresql.org/git/postgresql.git
