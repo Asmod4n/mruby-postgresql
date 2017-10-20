@@ -193,6 +193,54 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
   return self;
 }
 
+static mrb_value
+mrb_PQprepare(mrb_state *mrb, mrb_value self)
+{
+  const char *stmtName, *query;
+  mrb_int nParams = 0;
+  mrb_get_args(mrb, "zz|i", &stmtName, &query, &nParams);
+
+  PGresult *res = NULL;
+  errno = 0;
+  res = PQprepare((PGconn *) DATA_PTR(self), stmtName, query, nParams, NULL);
+  if (res) {
+    return mrb_pq_result_processor(mrb, self, res);
+  } else {
+    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+  }
+
+  return self;
+}
+
+static mrb_value
+mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
+{
+  const char *stmtName;
+  mrb_value *paramValues_val = NULL;
+  mrb_int nParams = 0;
+  mrb_get_args(mrb, "z|*", &stmtName, &paramValues_val, &nParams);
+
+  PGresult *res = NULL;
+  errno = 0;
+  if (nParams) {
+    const char *paramValues[nParams];
+    for (mrb_int i = 0; i < nParams; i++) {
+      paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+    }
+    res = PQexecPrepared((PGconn *) DATA_PTR(self), stmtName, nParams, paramValues, NULL, NULL, 0);
+  } else {
+    res = PQexecPrepared((PGconn *) DATA_PTR(self), stmtName, nParams, NULL, NULL, NULL, 0);
+  }
+  if (res) {
+    return mrb_pq_result_processor(mrb, self, res);
+  } else {
+    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+  }
+
+  return self;
+
+}
+
 static void
 mrb_PQnoticeProcessor(void *arg_, const char *message)
 {
@@ -261,10 +309,10 @@ mrb_PQfnumber(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "z", &column_name);
 
   int fnumber = PQfnumber((const PGresult *) DATA_PTR(self), column_name);
-  if (fnumber == -1) {
-    return mrb_nil_value();
-  } else {
+  if (fnumber != -1) {
     return mrb_fixnum_value(fnumber);
+  } else {
+    return mrb_nil_value();
   }
 }
 
@@ -410,6 +458,8 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
   mrb_define_method(mrb, pq_class, "initialize",  mrb_PQconnectdb, MRB_ARGS_OPT(1));
   mrb_define_method(mrb, pq_class, "exec",  mrb_PQexecParams, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
+  mrb_define_method(mrb, pq_class, "prepare",  mrb_PQprepare, MRB_ARGS_ARG(2, 1));
+  mrb_define_method(mrb, pq_class, "exec_prepared",  mrb_PQexecPrepared, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
   mrb_define_method(mrb, pq_class, "reset",  mrb_PQreset, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_class, "socket",  mrb_PQsocket, MRB_ARGS_NONE());
   mrb_define_alias (mrb, pq_class, "to_i", "socket");
