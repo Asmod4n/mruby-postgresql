@@ -18,6 +18,10 @@
 #error "mruby musn't be compiled with MRB_USE_FLOAT"
 #endif
 
+#ifndef E_IO_ERROR
+#define E_IO_ERROR (mrb_exc_get(mrb, "IOError"))
+#endif
+
 static void
 mrb_gc_PQfinish(mrb_state *mrb, void *conn)
 {
@@ -80,10 +84,23 @@ mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
 }
 
 static mrb_value
+mrb_PQfinish(mrb_state *mrb, mrb_value self)
+{
+  mrb_gc_PQfinish(mrb, DATA_PTR(self));
+  mrb_data_init(self, NULL, NULL);
+
+  return mrb_nil_value();
+}
+
+static mrb_value
 mrb_PQreset(mrb_state *mrb, mrb_value self)
 {
-  errno = 0;
   PGconn *conn = (PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
   PQreset(conn);
   if (PQstatus(conn) != CONNECTION_OK) {
     if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
@@ -97,6 +114,10 @@ static mrb_value
 mrb_PQsocket(mrb_state *mrb, mrb_value self)
 {
   const PGconn *conn = (const PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
   int socket = PQsocket(conn);
   if (socket == -1) {
     if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
@@ -138,8 +159,7 @@ mrb_pq_result_processor(mrb_state *mrb, mrb_value self, PGresult *res)
       switch(PQresultStatus(res)) {
         case PGRES_TUPLES_OK:
         case PGRES_SINGLE_TUPLE: {
-          return_val = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result")));
-          mrb_data_init(return_val, res, &mrb_PGresult_type);
+          return_val = mrb_obj_value(mrb_data_object_alloc(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res, &mrb_PGresult_type));
         } break;
         case PGRES_EMPTY_QUERY:
         case PGRES_BAD_RESPONSE:
@@ -172,6 +192,10 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
   mrb_value *paramValues_val = NULL;
   mrb_int nParams = 0;
   mrb_get_args(mrb, "z|*", &command, &paramValues_val, &nParams);
+  PGconn *conn = (PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
 
   PGresult *res = NULL;
   errno = 0;
@@ -180,9 +204,9 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
     for (mrb_int i = 0; i < nParams; i++) {
       paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
     }
-    res = PQexecParams((PGconn *) DATA_PTR(self), command, nParams, NULL, paramValues, NULL, NULL, 0);
+    res = PQexecParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
   } else {
-    res = PQexecParams((PGconn *) DATA_PTR(self), command, nParams, NULL, NULL, NULL, NULL, 0);
+    res = PQexecParams(conn, command, nParams, NULL, NULL, NULL, NULL, 0);
   }
   if (res) {
     return mrb_pq_result_processor(mrb, self, res);
@@ -197,12 +221,15 @@ static mrb_value
 mrb_PQprepare(mrb_state *mrb, mrb_value self)
 {
   const char *stmtName, *query;
-  mrb_int nParams = 0;
-  mrb_get_args(mrb, "zz|i", &stmtName, &query, &nParams);
+  mrb_get_args(mrb, "zz", &stmtName, &query);
+  PGconn *conn = (PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
 
   PGresult *res = NULL;
   errno = 0;
-  res = PQprepare((PGconn *) DATA_PTR(self), stmtName, query, nParams, NULL);
+  res = PQprepare(conn, stmtName, query, 0, NULL);
   if (res) {
     return mrb_pq_result_processor(mrb, self, res);
   } else {
@@ -219,6 +246,10 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
   mrb_value *paramValues_val = NULL;
   mrb_int nParams = 0;
   mrb_get_args(mrb, "z|*", &stmtName, &paramValues_val, &nParams);
+  PGconn *conn = (PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
 
   PGresult *res = NULL;
   errno = 0;
@@ -227,9 +258,9 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
     for (mrb_int i = 0; i < nParams; i++) {
       paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
     }
-    res = PQexecPrepared((PGconn *) DATA_PTR(self), stmtName, nParams, paramValues, NULL, NULL, 0);
+    res = PQexecPrepared(conn, stmtName, nParams, paramValues, NULL, NULL, 0);
   } else {
-    res = PQexecPrepared((PGconn *) DATA_PTR(self), stmtName, nParams, NULL, NULL, NULL, 0);
+    res = PQexecPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
   }
   if (res) {
     return mrb_pq_result_processor(mrb, self, res);
@@ -261,16 +292,21 @@ mrb_PQsetNoticeProcessor(mrb_state *mrb, mrb_value self)
   if (mrb_type(block) != MRB_TT_PROC) {
     mrb_raise(mrb, E_TYPE_ERROR, "not a block");
   }
+  PGconn *conn = (PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
 
-  mrb_value notice_processor = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "NoticeProcessor")));
-  mrb_PQnoticeProcessor_arg *arg = (mrb_PQnoticeProcessor_arg *) mrb_realloc(mrb, DATA_PTR(notice_processor), sizeof(*arg));
-  mrb_data_init(notice_processor, arg, &mrb_PQnoticeProcessor_type);
+  mrb_PQnoticeProcessor_arg *arg;
+  struct RData *notice_processor_data;
+  Data_Make_Struct(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "NoticeProcessor"), mrb_PQnoticeProcessor_arg, &mrb_PQnoticeProcessor_type, arg, notice_processor_data);
   arg->mrb = mrb;
   arg->block = block;
+  mrb_value notice_processor = mrb_obj_value(notice_processor_data);
   mrb_iv_set(mrb, notice_processor, mrb_intern_lit(mrb, "block"), block);
   mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "notice_processor"), notice_processor);
 
-  PQsetNoticeProcessor((PGconn *) DATA_PTR(self), mrb_PQnoticeProcessor, arg);
+  PQsetNoticeProcessor(conn, mrb_PQnoticeProcessor, arg);
 
   return self;
 }
@@ -457,8 +493,10 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   pq_class = mrb_define_class(mrb, "Pq", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
   mrb_define_method(mrb, pq_class, "initialize",  mrb_PQconnectdb, MRB_ARGS_OPT(1));
+  mrb_define_method(mrb, pq_class, "finish",  mrb_PQfinish, MRB_ARGS_NONE());
+  mrb_define_alias (mrb, pq_class, "close", "finish");
   mrb_define_method(mrb, pq_class, "exec",  mrb_PQexecParams, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
-  mrb_define_method(mrb, pq_class, "prepare",  mrb_PQprepare, MRB_ARGS_ARG(2, 1));
+  mrb_define_method(mrb, pq_class, "_prepare",  mrb_PQprepare, MRB_ARGS_REQ(2));
   mrb_define_method(mrb, pq_class, "exec_prepared",  mrb_PQexecPrepared, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
   mrb_define_method(mrb, pq_class, "reset",  mrb_PQreset, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_class, "socket",  mrb_PQsocket, MRB_ARGS_NONE());
