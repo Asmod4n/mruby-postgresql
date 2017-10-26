@@ -4,14 +4,16 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
   spec.summary = 'Postgresql adapter for mruby'
   spec.add_dependency 'mruby-errno'
 
-  create_build_dir_cmd = "mkdir -p #{spec.build_dir}/build && cd #{spec.build_dir}/build"
-  configure_cmd = "#{spec.dir}/deps/postgresql/configure CC=#{spec.cc.command} CFLAGS=\"#{spec.cc.flags.join(' ')}\" LDFLAGS=\"#{spec.linker.flags.join(' ')}\" CXX=#{spec.cxx.command} CXXFLAGS=\"#{spec.cxx.flags.join(' ')}\" --prefix=#{spec.build_dir}"
-  build_cmd = "cd src/interfaces/libpq && make -j4 && make install && cd #{spec.build_dir}/build/src/backend && make -j4 generated-headers && cd #{spec.build_dir}/build/src/include && make install"
-
   if spec.cc.search_header_path 'libpq-fe.h'
     spec.linker.libraries << 'pq'
   else
     unless File.exists?("#{spec.build_dir}/lib/libpq.a")
+      create_build_dir_cmd = "mkdir -p #{spec.build_dir}/build && cd #{spec.build_dir}/build"
+      configure_cmd = "#{spec.dir}/deps/postgresql/configure CC=#{spec.cc.command} CFLAGS=\"#{spec.cc.flags.join(' ')}\" LDFLAGS=\"#{spec.linker.flags.join(' ')}\" CXX=#{spec.cxx.command} CXXFLAGS=\"#{spec.cxx.flags.join(' ')}\" --prefix=#{spec.build_dir}"
+      if spec.cc.search_header_path('openssl/crypto.h') && spec.cc.search_header_path('openssl/ssl.h')
+        configure_cmd << " --with-openssl"
+      end
+      build_cmd = "cd src/interfaces/libpq && make -j4 && make install && cd #{spec.build_dir}/build/src/backend && make -j4 generated-headers && cd #{spec.build_dir}/build/src/include && make install"
       warn "#{spec.name}: cannot find libpq, building it"
       if build.is_a?(MRuby::CrossBuild) && build.host_target && build.build_target
         sh "#{create_build_dir_cmd} && #{configure_cmd} --host=#{build.host_target} --build=#{build.build_target} && #{build_cmd}"

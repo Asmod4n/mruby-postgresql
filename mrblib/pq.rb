@@ -5,9 +5,11 @@ end
 class Pq
   class Error < StandardError; end
   class ConnectionError < Error; end
+
   class Result
     class Error < Pq::Error; end
     class InvalidOid < Error; end
+    attr_reader :status
 
     def values
       fnames = []
@@ -30,7 +32,19 @@ class Pq
       end
       rows
     end
-  end
+
+    def copy_in?
+      status == COPY_IN
+    end
+
+    def copy_out?
+      status == COPY_OUT
+    end
+
+    def single_tuple?
+      status == SINGLE_TUPLE
+    end
+  end # class Result
 
   def prepare(stmt_name, query)
     _prepare(stmt_name, query)

@@ -157,10 +157,6 @@ mrb_pq_result_processor(mrb_state *mrb, mrb_value self, PGresult *res)
   {
       mrb->jmp = &c_jmp;
       switch(PQresultStatus(res)) {
-        case PGRES_TUPLES_OK:
-        case PGRES_SINGLE_TUPLE: {
-          return_val = mrb_obj_value(mrb_data_object_alloc(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res, &mrb_PGresult_type));
-        } break;
         case PGRES_EMPTY_QUERY:
         case PGRES_BAD_RESPONSE:
         case PGRES_NONFATAL_ERROR:
@@ -169,7 +165,8 @@ mrb_pq_result_processor(mrb_state *mrb, mrb_value self, PGresult *res)
           mrb_raise(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), "Error"), PQresultErrorMessage(res));
         } break;
         default: {
-          PQclear(res);
+          return_val = mrb_obj_value(mrb_data_object_alloc(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res, &mrb_PGresult_type));
+          mrb_iv_set(mrb, return_val, mrb_intern_lit(mrb, "@status"), mrb_fixnum_value(PQresultStatus(res)));
         }
       }
       mrb->jmp = prev_jmp;
@@ -506,6 +503,16 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   MRB_SET_INSTANCE_TT(pq_notice_processor_class, MRB_TT_DATA);
   pq_result_class = mrb_define_class_under(mrb, pq_class, "Result", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_result_class, MRB_TT_DATA);
+  mrb_define_const(mrb, pq_result_class, "EMPTY_QUERY", mrb_fixnum_value(PGRES_EMPTY_QUERY));
+  mrb_define_const(mrb, pq_result_class, "COMMAND_OK", mrb_fixnum_value(PGRES_COMMAND_OK));
+  mrb_define_const(mrb, pq_result_class, "TUPLES_OK", mrb_fixnum_value(PGRES_TUPLES_OK));
+  mrb_define_const(mrb, pq_result_class, "COPY_OUT", mrb_fixnum_value(PGRES_COPY_OUT));
+  mrb_define_const(mrb, pq_result_class, "COPY_IN", mrb_fixnum_value(PGRES_COPY_IN));
+  mrb_define_const(mrb, pq_result_class, "BAD_RESPONSE", mrb_fixnum_value(PGRES_BAD_RESPONSE));
+  mrb_define_const(mrb, pq_result_class, "NONFATAL_ERROR", mrb_fixnum_value(PGRES_NONFATAL_ERROR));
+  mrb_define_const(mrb, pq_result_class, "FATAL_ERROR", mrb_fixnum_value(PGRES_FATAL_ERROR));
+  mrb_define_const(mrb, pq_result_class, "COPY_BOTH", mrb_fixnum_value(PGRES_COPY_BOTH));
+  mrb_define_const(mrb, pq_result_class, "SINGLE_TUPLE", mrb_fixnum_value(PGRES_SINGLE_TUPLE));
   mrb_define_method(mrb, pq_result_class, "ntuples", mrb_PQntuples, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_result_class, "nfields", mrb_PQnfields, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_result_class, "fname", mrb_PQfname, MRB_ARGS_REQ(1));
