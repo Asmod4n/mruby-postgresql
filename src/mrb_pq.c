@@ -175,7 +175,7 @@ mrb_pq_result_processor(mrb_state *mrb, struct RClass *pq_class, PGresult *res)
       return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "BadResponseError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
     } break;
     case PGRES_NONFATAL_ERROR: {
-      return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "NonfatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
+      return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "NonFatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
     } break;
     case PGRES_FATAL_ERROR: {
       return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "FatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
