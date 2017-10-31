@@ -3,12 +3,19 @@ unless Object.const_defined?("IOError")
 end
 
 class Pq
-  class Error < StandardError; end
-  class ConnectionError < Error; end
-
   class Result
-    class Error < Pq::Error; end
-    class InvalidOid < Error; end
+    class Error < Pq::Error
+      self.constants.each do |const|
+        define_method(const.downcase) do
+          field(self.class.const_get(const))
+        end
+      end
+    end
+    class EmptyQueryError < Error; end
+    class BadResponseError < Error; end
+    class NonFatalError < Error; end
+    class FatalError < Error; end
+
     attr_reader :status
 
     def values
@@ -58,6 +65,10 @@ class Pq
 
     def exec(*args)
       @conn.exec_prepared(@stmt_name, *args)
+    end
+
+    def describe
+      @conn.describe_prepared(@stmt_name)
     end
   end
 end
