@@ -4,8 +4,14 @@ end
 
 class Pq
   class Result
+    constants.each do |const|
+      define_method("#{const.downcase}?") do
+        status == self.class.const_get(const)
+      end
+    end
+
     class Error < Pq::Error
-      self.constants.each do |const|
+      constants.each do |const|
         define_method(const.downcase) do
           field(self.class.const_get(const))
         end
@@ -15,10 +21,11 @@ class Pq
     class BadResponseError < Error; end
     class NonFatalError < Error; end
     class FatalError < Error; end
+    class InvalidOid < Error; end
 
     attr_reader :status
 
-    def values
+    def to_ary
       fnames = []
       column = 0
       while column < nfields
@@ -38,18 +45,6 @@ class Pq
         row += 1
       end
       rows
-    end
-
-    def copy_in?
-      status == COPY_IN
-    end
-
-    def copy_out?
-      status == COPY_OUT
-    end
-
-    def single_tuple?
-      status == SINGLE_TUPLE
     end
   end # class Result
 

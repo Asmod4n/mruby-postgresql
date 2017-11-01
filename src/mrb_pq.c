@@ -142,6 +142,23 @@ mrb_PQsocket(mrb_state *mrb, mrb_value self)
   return mrb_fixnum_value(socket);
 }
 
+static mrb_value
+mrb_PQrequestCancel(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) DATA_PTR(self);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  int success = PQrequestCancel(conn);
+  if (unlikely(!success)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+
+  return mrb_symbol_value(mrb_intern_lit(mrb, "cancel"));
+}
+
 MRB_INLINE const char *
 mrb_pq_encode_text_value(mrb_state *mrb, mrb_value value)
 {
@@ -191,33 +208,91 @@ mrb_pq_result_processor(mrb_state *mrb, struct RClass *pq_class, PGresult *res)
   return return_val;
 }
 
+static void
+mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value block)
+{
+  int arena_index = mrb_gc_arena_save(mrb);
+  struct mrb_jmpbuf* prev_jmp = mrb->jmp;
+  struct RClass *pq_class = mrb_obj_class(mrb, self);
+  struct mrb_jmpbuf c_jmp;
+
+  PQsetSingleRowMode(conn);
+  PGresult *res = PQgetResult(conn);
+
+  MRB_TRY(&c_jmp)
+  {
+    mrb->jmp = &c_jmp;
+    while (res) {
+      mrb_value ret = mrb_yield(mrb, block, mrb_pq_result_processor(mrb, pq_class, res));
+      mrb_gc_arena_restore(mrb, arena_index);
+      if (mrb_symbol_p(ret) && mrb_symbol(ret) == mrb_intern_lit(mrb, "cancel")) {
+        while ((res = PQgetResult(conn))) {
+          PQclear(res);
+        }
+        break;
+      }
+      res = PQgetResult(conn);
+    }
+    mrb->jmp = prev_jmp;
+  }
+  MRB_CATCH(&c_jmp)
+  {
+    mrb->jmp = prev_jmp;
+    while ((res = PQgetResult(conn))) {
+      PQclear(res);
+    }
+    MRB_THROW(mrb->jmp);
+  }
+  MRB_END_EXC(&c_jmp);
+}
+
 static mrb_value
 mrb_PQexecParams(mrb_state *mrb, mrb_value self)
 {
   const char *command;
   mrb_value *paramValues_val = NULL;
   mrb_int nParams = 0;
-  mrb_get_args(mrb, "z|*", &command, &paramValues_val, &nParams);
+  mrb_value block = mrb_nil_value();
+  mrb_get_args(mrb, "z|*&", &command, &paramValues_val, &nParams, &block);
   PGconn *conn = (PGconn *) DATA_PTR(self);
   if (!conn) {
     mrb_raise(mrb, E_IO_ERROR, "closed stream");
   }
 
-  PGresult *res = NULL;
-  errno = 0;
-  if (nParams) {
-    const char *paramValues[nParams];
-    for (mrb_int i = 0; i < nParams; i++) {
-      paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+  if (mrb_type(block) == MRB_TT_PROC) {
+    int success = FALSE;
+    errno = 0;
+    if (nParams) {
+      const char *paramValues[nParams];
+      for (mrb_int i = 0; i < nParams; i++) {
+        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+      }
+      success = PQsendQueryParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
+    } else {
+      success = PQsendQueryParams(conn, command, nParams, NULL, NULL, NULL, NULL, 0);
     }
-    res = PQexecParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
+    if (likely(success)) {
+      mrb_pq_consume_each_row(mrb, self, conn, block);
+    } else {
+      mrb_pq_handle_connection_error(mrb, self, conn);
+    }
   } else {
-    res = PQexecParams(conn, command, nParams, NULL, NULL, NULL, NULL, 0);
-  }
-  if (likely(res)) {
-    return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
-  } else {
-    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    PGresult *res = NULL;
+    errno = 0;
+    if (nParams) {
+      const char *paramValues[nParams];
+      for (mrb_int i = 0; i < nParams; i++) {
+        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+      }
+      res = PQexecParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
+    } else {
+      res = PQexecParams(conn, command, nParams, NULL, NULL, NULL, NULL, 0);
+    }
+    if (likely(res)) {
+      return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+    } else {
+      mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    }
   }
 
   return self;
@@ -251,27 +326,47 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
   const char *stmtName;
   mrb_value *paramValues_val = NULL;
   mrb_int nParams = 0;
-  mrb_get_args(mrb, "z|*", &stmtName, &paramValues_val, &nParams);
+  mrb_value block = mrb_nil_value();
+  mrb_get_args(mrb, "z|*&", &stmtName, &paramValues_val, &nParams, &block);
   PGconn *conn = (PGconn *) DATA_PTR(self);
   if (!conn) {
     mrb_raise(mrb, E_IO_ERROR, "closed stream");
   }
 
-  PGresult *res = NULL;
-  errno = 0;
-  if (nParams) {
-    const char *paramValues[nParams];
-    for (mrb_int i = 0; i < nParams; i++) {
-      paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+  if (mrb_type(block) == MRB_TT_PROC) {
+    int success = FALSE;
+    errno = 0;
+    if (nParams) {
+      const char *paramValues[nParams];
+      for (mrb_int i = 0; i < nParams; i++) {
+        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+      }
+      success = PQsendQueryPrepared(conn, stmtName, nParams, paramValues, NULL, NULL, 0);
+    } else {
+      success = PQsendQueryPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
     }
-    res = PQexecPrepared(conn, stmtName, nParams, paramValues, NULL, NULL, 0);
+    if (likely(success)) {
+      mrb_pq_consume_each_row(mrb, self, conn, block);
+    } else {
+      mrb_pq_handle_connection_error(mrb, self, conn);
+    }
   } else {
-    res = PQexecPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
-  }
-  if (likely(res)) {
-    return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
-  } else {
-    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    PGresult *res = NULL;
+    errno = 0;
+    if (nParams) {
+      const char *paramValues[nParams];
+      for (mrb_int i = 0; i < nParams; i++) {
+        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+      }
+      res = PQexecPrepared(conn, stmtName, nParams, paramValues, NULL, NULL, 0);
+    } else {
+      res = PQexecPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
+    }
+    if (likely(res)) {
+      return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+    } else {
+      mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    }
   }
 
   return self;
@@ -567,12 +662,13 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method(mrb, pq_class, "initialize",  mrb_PQconnectdb, MRB_ARGS_OPT(1));
   mrb_define_method(mrb, pq_class, "finish",  mrb_PQfinish, MRB_ARGS_NONE());
   mrb_define_alias (mrb, pq_class, "close", "finish");
-  mrb_define_method(mrb, pq_class, "exec",  mrb_PQexecParams, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
+  mrb_define_method(mrb, pq_class, "exec",  mrb_PQexecParams, MRB_ARGS_REQ(1)|MRB_ARGS_REST()|MRB_ARGS_BLOCK());
   mrb_define_method(mrb, pq_class, "_prepare",  mrb_PQprepare, MRB_ARGS_REQ(2));
-  mrb_define_method(mrb, pq_class, "exec_prepared",  mrb_PQexecPrepared, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
+  mrb_define_method(mrb, pq_class, "exec_prepared",  mrb_PQexecPrepared, MRB_ARGS_REQ(1)|MRB_ARGS_REST()|MRB_ARGS_BLOCK());
   mrb_define_method(mrb, pq_class, "describe_prepared",  mrb_PQdescribePrepared, MRB_ARGS_OPT(1));
   mrb_define_method(mrb, pq_class, "describe_portal",  mrb_PQdescribePortal, MRB_ARGS_OPT(1));
   mrb_define_method(mrb, pq_class, "reset",  mrb_PQreset, MRB_ARGS_NONE());
+  mrb_define_method(mrb, pq_class, "cancel",  mrb_PQrequestCancel, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_class, "socket",  mrb_PQsocket, MRB_ARGS_NONE());
   mrb_define_alias (mrb, pq_class, "to_i", "socket");
   mrb_define_method(mrb, pq_class, "notice_receiver",  mrb_PQsetNoticeReceiver, MRB_ARGS_BLOCK());
@@ -607,7 +703,6 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   pq_result_error_class = mrb_define_class_under(mrb, pq_result_class, "Error", pq_error_class);
   MRB_SET_INSTANCE_TT(pq_result_error_class, MRB_TT_DATA);
   mrb_include_module(mrb, pq_result_error_class, pq_result_mixins);
-  mrb_define_class_under(mrb, pq_result_class, "InvalidOid", pq_result_error_class);
   mrb_define_method(mrb, pq_result_error_class, "field", mrb_PQresultErrorField, MRB_ARGS_REQ(1));
   mrb_define_const(mrb, pq_result_error_class, "SEVERITY", mrb_fixnum_value(PG_DIAG_SEVERITY));
   mrb_define_const(mrb, pq_result_error_class, "SQLSTATE", mrb_fixnum_value(PG_DIAG_SQLSTATE));

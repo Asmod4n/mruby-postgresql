@@ -21,13 +21,13 @@ Executing queries
 Without arguments
 ```ruby
 res = conn.exec("select * from pg_database")
-puts res.values
+puts res.to_ary
 ```
 
 With arguments
 ```ruby
 res = conn.exec("select * from pg_type where typname = $1", "bool")
-puts res.values
+puts res.to_ary
 ```
 Passed arguments are automatically escaped to prevent SQL-injection. The first argument is $1, the second $2 and so on.
 
@@ -42,5 +42,5 @@ The statement name can be empty (not nil) so it defines the default statement
 Executing a prepared statement
 ```ruby
 res = statement.exec("bool")
-puts res.values
+puts res.to_ary
 ```
