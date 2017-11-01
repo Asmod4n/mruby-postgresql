@@ -603,11 +603,11 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method(mrb, pq_result_mixins, "ftype", mrb_PQftype, MRB_ARGS_REQ(1));
   pq_result_class = mrb_define_class_under(mrb, pq_class, "Result", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_result_class, MRB_TT_DATA);
-  mrb_define_class_under(mrb, pq_result_class, "InvalidOid", pq_result_error_class);
   mrb_include_module(mrb, pq_result_class, pq_result_mixins);
   pq_result_error_class = mrb_define_class_under(mrb, pq_result_class, "Error", pq_error_class);
   MRB_SET_INSTANCE_TT(pq_result_error_class, MRB_TT_DATA);
   mrb_include_module(mrb, pq_result_error_class, pq_result_mixins);
+  mrb_define_class_under(mrb, pq_result_class, "InvalidOid", pq_result_error_class);
   mrb_define_method(mrb, pq_result_error_class, "field", mrb_PQresultErrorField, MRB_ARGS_REQ(1));
   mrb_define_const(mrb, pq_result_error_class, "SEVERITY", mrb_fixnum_value(PG_DIAG_SEVERITY));
   mrb_define_const(mrb, pq_result_error_class, "SQLSTATE", mrb_fixnum_value(PG_DIAG_SQLSTATE));
