@@ -1,71 +1,4 @@
-#include <libpq-fe.h>
-#include <mruby.h>
-#include <mruby/data.h>
-#include <mruby/value.h>
-#include <mruby/array.h>
-#include <mruby/string.h>
-#include <mruby/class.h>
-#include <mruby/error.h>
-#include <mruby/variable.h>
-#include <mruby/throw.h>
-#include <string.h>
-#include <errno.h>
-#include <stdlib.h>
-#if (MRB_INT_BIT < 64)
-#error "mruby integer type must be 64 bit"
-#endif
-#ifdef MRB_USE_FLOAT
-#error "mruby musn't be compiled with MRB_USE_FLOAT"
-#endif
-
-#ifndef E_IO_ERROR
-#define E_IO_ERROR (mrb_exc_get(mrb, "IOError"))
-#endif
-
-#if (__GNUC__ >= 3) || (__INTEL_COMPILER >= 800) || defined(__clang__)
-# define likely(x) __builtin_expect(!!(x), 1)
-# define unlikely(x) __builtin_expect(!!(x), 0)
-#else
-# define likely(x) (x)
-# define unlikely(x) (x)
-#endif
-
-static void
-mrb_gc_PQfinish(mrb_state *mrb, void *conn)
-{
-  PQfinish((PGconn *) conn);
-}
-
-static const struct mrb_data_type mrb_PGconn_type = {
-  "$i_mrb_PGconn", mrb_gc_PQfinish
-};
-
-static void
-mrb_gc_PQclear(mrb_state *mrb, void *res)
-{
-  PQclear((PGresult *) res);
-}
-
-static const struct mrb_data_type mrb_PGresult_type = {
-  "$i_mrb_PGresult", mrb_gc_PQclear
-};
-
-typedef struct {
-  mrb_state *mrb;
-  struct RClass *pq_class;
-  mrb_value block;
-} mrb_PQnoticeReceiver_arg;
-
-static const struct mrb_data_type mrb_PQnoticeReceiver_type = {
-  "$i_mrb_PQnoticeReceiver", mrb_free
-};
-
-static void
-mrb_pq_handle_connection_error(mrb_state *mrb, mrb_value self, const PGconn *conn)
-{
-  if (errno) mrb_sys_fail(mrb, PQerrorMessage(conn));
-  mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "ConnectionError"), PQerrorMessage(conn));
-}
+#include "mrb_pq.h"
 
 static mrb_value
 mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
@@ -223,13 +156,17 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
   {
     mrb->jmp = &c_jmp;
     while (res) {
-      mrb_value ret = mrb_yield(mrb, block, mrb_pq_result_processor(mrb, pq_class, res));
-      mrb_gc_arena_restore(mrb, arena_index);
-      if (mrb_symbol_p(ret) && mrb_symbol(ret) == mrb_intern_lit(mrb, "cancel")) {
-        while ((res = PQgetResult(conn))) {
-          PQclear(res);
+      if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        mrb_value ret = mrb_yield(mrb, block, mrb_pq_result_processor(mrb, pq_class, res));
+        mrb_gc_arena_restore(mrb, arena_index);
+        if (mrb_symbol_p(ret) && mrb_symbol(ret) == mrb_intern_lit(mrb, "cancel")) {
+          while ((res = PQgetResult(conn))) {
+            PQclear(res);
+          }
+          break;
         }
-        break;
+      } else {
+        PQclear(res);
       }
       res = PQgetResult(conn);
     }
@@ -247,7 +184,7 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
 }
 
 static mrb_value
-mrb_PQexecParams(mrb_state *mrb, mrb_value self)
+mrb_PQexec(mrb_state *mrb, mrb_value self)
 {
   const char *command;
   mrb_value *paramValues_val = NULL;
@@ -269,7 +206,7 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
       }
       success = PQsendQueryParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
     } else {
-      success = PQsendQueryParams(conn, command, nParams, NULL, NULL, NULL, NULL, 0);
+      success = PQsendQuery(conn, command);
     }
     if (likely(success)) {
       mrb_pq_consume_each_row(mrb, self, conn, block);
@@ -286,7 +223,7 @@ mrb_PQexecParams(mrb_state *mrb, mrb_value self)
       }
       res = PQexecParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
     } else {
-      res = PQexecParams(conn, command, nParams, NULL, NULL, NULL, NULL, 0);
+      res = PQexec(conn, command);
     }
     if (likely(res)) {
       return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
@@ -566,14 +503,14 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
       if (mrb_class_defined(mrb, "JSON")) {
         return mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "JSON")), "parse", 1, mrb_str_new_static(mrb, value, PQgetlength(result, row_number, column_number)));
       } else {
-        return mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number));
+        goto def;
       }
     } break;
     case 142: {
       if (mrb_class_defined(mrb, "XML")) {
         return mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "XML")), "parse", 1, mrb_str_new_static(mrb, value, PQgetlength(result, row_number, column_number)));
       } else {
-        return mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number));
+        goto def;
       }
     } break;
     case 700: { // float
@@ -583,6 +520,7 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
       return mrb_float_value(mrb, strtod(value, NULL));
     } break;
     default: {
+def:
       return mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number));
     }
   }
@@ -599,7 +537,7 @@ mrb_PQgetvalue(mrb_state *mrb, mrb_value self)
 
   char *value = PQgetvalue(result, (int) row_number, (int) column_number);
   if (value) {
-    if (strlen(value) == 0 && PQgetisnull(result, (int) row_number, (int) column_number)) {
+    if (PQgetisnull(result, (int) row_number, (int) column_number)) {
       return mrb_symbol_value(mrb_intern_lit(mrb, "NULL"));
     } else {
       return mrb_pq_decode_text_value(mrb, result, (int) row_number, (int) column_number, value);
@@ -662,7 +600,7 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method(mrb, pq_class, "initialize",  mrb_PQconnectdb, MRB_ARGS_OPT(1));
   mrb_define_method(mrb, pq_class, "finish",  mrb_PQfinish, MRB_ARGS_NONE());
   mrb_define_alias (mrb, pq_class, "close", "finish");
-  mrb_define_method(mrb, pq_class, "exec",  mrb_PQexecParams, MRB_ARGS_REQ(1)|MRB_ARGS_REST()|MRB_ARGS_BLOCK());
+  mrb_define_method(mrb, pq_class, "exec",  mrb_PQexec, MRB_ARGS_REQ(1)|MRB_ARGS_REST()|MRB_ARGS_BLOCK());
   mrb_define_method(mrb, pq_class, "_prepare",  mrb_PQprepare, MRB_ARGS_REQ(2));
   mrb_define_method(mrb, pq_class, "exec_prepared",  mrb_PQexecPrepared, MRB_ARGS_REQ(1)|MRB_ARGS_REST()|MRB_ARGS_BLOCK());
   mrb_define_method(mrb, pq_class, "describe_prepared",  mrb_PQdescribePrepared, MRB_ARGS_OPT(1));
