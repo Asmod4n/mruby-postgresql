@@ -539,8 +539,10 @@ mrb_PQgetvalue(mrb_state *mrb, mrb_value self)
   if (value) {
     if (PQgetisnull(result, (int) row_number, (int) column_number)) {
       return mrb_symbol_value(mrb_intern_lit(mrb, "NULL"));
-    } else {
+    } else if (PQfformat(result, (int) row_number, (int) column_number) == 0) {
       return mrb_pq_decode_text_value(mrb, result, (int) row_number, (int) column_number, value);
+    } else {
+      return mrb_str_new(mrb, value, PQgetlength(result, (int) row_number, (int) column_number));
     }
   } else {
     return mrb_nil_value();
