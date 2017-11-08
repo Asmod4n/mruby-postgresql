@@ -151,13 +151,15 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
 
   PQsetSingleRowMode(conn);
   PGresult *res = PQgetResult(conn);
+  mrb_value result = mrb_nil_value();
 
   MRB_TRY(&c_jmp)
   {
     mrb->jmp = &c_jmp;
     while (res) {
       if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-        mrb_value ret = mrb_yield(mrb, block, mrb_pq_result_processor(mrb, pq_class, res));
+        result = mrb_pq_result_processor(mrb, pq_class, res);
+        mrb_value ret = mrb_yield(mrb, block, result);
         mrb_gc_arena_restore(mrb, arena_index);
         if (mrb_symbol_p(ret) && mrb_symbol(ret) == mrb_intern_lit(mrb, "cancel")) {
           while ((res = PQgetResult(conn))) {
@@ -175,6 +177,9 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
   MRB_CATCH(&c_jmp)
   {
     mrb->jmp = prev_jmp;
+    if (!mrb_data_check_get_ptr(mrb, result, &mrb_PGresult_type)) {
+      PQclear(res);
+    }
     while ((res = PQgetResult(conn))) {
       PQclear(res);
     }
