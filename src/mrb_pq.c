@@ -113,30 +113,43 @@ mrb_pq_encode_text_value(mrb_state *mrb, mrb_value value)
 }
 
 static mrb_value
-mrb_pq_result_processor(mrb_state *mrb, struct RClass *pq_class, PGresult *res)
+mrb_pq_result_processor(mrb_state *mrb, struct RClass *pq_result_class, PGresult *res)
 {
+  struct mrb_jmpbuf* prev_jmp = mrb->jmp;
+  struct mrb_jmpbuf c_jmp;
   mrb_value return_val;
 
-  switch(PQresultStatus(res)) {
-    case PGRES_EMPTY_QUERY: {
-      return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "EmptyQueryError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
-    } break;
-    case PGRES_BAD_RESPONSE: {
-      return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "BadResponseError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
-    } break;
-    case PGRES_NONFATAL_ERROR: {
-      return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "NonFatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
-    } break;
-    case PGRES_FATAL_ERROR: {
-      return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, mrb_class_get_under(mrb, pq_class, "Result"), "FatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
-    } break;
-    default: {
-      return_val = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, mrb_class_get_under(mrb, pq_class, "Result")));
-      mrb_iv_set(mrb, return_val, mrb_intern_lit(mrb, "@status"), mrb_fixnum_value(PQresultStatus(res)));
+  MRB_TRY(&c_jmp)
+  {
+    mrb->jmp = &c_jmp;
+    switch(PQresultStatus(res)) {
+      case PGRES_EMPTY_QUERY: {
+        return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, pq_result_class, "EmptyQueryError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
+      } break;
+      case PGRES_BAD_RESPONSE: {
+        return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, pq_result_class, "BadResponseError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
+      } break;
+      case PGRES_NONFATAL_ERROR: {
+        return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, pq_result_class, "NonFatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
+      } break;
+      case PGRES_FATAL_ERROR: {
+        return_val = mrb_exc_new_str(mrb, mrb_class_get_under(mrb, pq_result_class, "FatalError"), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
+      } break;
+      default: {
+        return_val = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, pq_result_class));
+        mrb_iv_set(mrb, return_val, mrb_intern_lit(mrb, "@status"), mrb_fixnum_value(PQresultStatus(res)));
+      }
     }
+    mrb_data_init(return_val, res, &mrb_PGresult_type);
+    mrb->jmp = prev_jmp;
   }
-
-  mrb_data_init(return_val, res, &mrb_PGresult_type);
+  MRB_CATCH(&c_jmp)
+  {
+    mrb->jmp = prev_jmp;
+    PQclear(res);
+    MRB_THROW(mrb->jmp);
+  }
+  MRB_END_EXC(&c_jmp);
 
   return return_val;
 }
@@ -146,29 +159,24 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
 {
   int arena_index = mrb_gc_arena_save(mrb);
   struct mrb_jmpbuf* prev_jmp = mrb->jmp;
-  struct RClass *pq_class = mrb_obj_class(mrb, self);
+  struct RClass *pq_result_class = mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result");
   struct mrb_jmpbuf c_jmp;
 
   PQsetSingleRowMode(conn);
   PGresult *res = PQgetResult(conn);
-  mrb_value result = mrb_nil_value();
+  mrb_sym cancel = mrb_intern_lit(mrb, "cancel");
 
   MRB_TRY(&c_jmp)
   {
     mrb->jmp = &c_jmp;
     while (res) {
-      if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-        result = mrb_pq_result_processor(mrb, pq_class, res);
-        mrb_value ret = mrb_yield(mrb, block, result);
-        mrb_gc_arena_restore(mrb, arena_index);
-        if (mrb_symbol_p(ret) && mrb_symbol(ret) == mrb_intern_lit(mrb, "cancel")) {
-          while ((res = PQgetResult(conn))) {
-            PQclear(res);
-          }
-          break;
+      mrb_value ret = mrb_yield(mrb, block, mrb_pq_result_processor(mrb, pq_result_class, res));
+      mrb_gc_arena_restore(mrb, arena_index);
+      if (mrb_symbol_p(ret) && mrb_symbol(ret) == cancel) {
+        while ((res = PQgetResult(conn))) {
+          PQclear(res);
         }
-      } else {
-        PQclear(res);
+        break;
       }
       res = PQgetResult(conn);
     }
@@ -177,9 +185,6 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
   MRB_CATCH(&c_jmp)
   {
     mrb->jmp = prev_jmp;
-    if (!mrb_data_check_get_ptr(mrb, result, &mrb_PGresult_type)) {
-      PQclear(res);
-    }
     while ((res = PQgetResult(conn))) {
       PQclear(res);
     }
@@ -231,7 +236,7 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
       res = PQexec(conn, command);
     }
     if (likely(res)) {
-      return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+      return mrb_pq_result_processor(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res);
     } else {
       mrb_sys_fail(mrb, PQresultErrorMessage(res));
     }
@@ -254,7 +259,7 @@ mrb_PQprepare(mrb_state *mrb, mrb_value self)
   errno = 0;
   res = PQprepare(conn, stmtName, query, 0, NULL);
   if (likely(res)) {
-    return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+    return mrb_pq_result_processor(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res);
   } else {
     mrb_sys_fail(mrb, PQresultErrorMessage(res));
   }
@@ -305,7 +310,7 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
       res = PQexecPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
     }
     if (likely(res)) {
-      return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+      return mrb_pq_result_processor(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res);
     } else {
       mrb_sys_fail(mrb, PQresultErrorMessage(res));
     }
@@ -328,7 +333,7 @@ mrb_PQdescribePrepared(mrb_state *mrb, mrb_value self)
   errno = 0;
   PGresult *res = PQdescribePrepared(conn, stmtName);
   if (likely(res)) {
-    return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+    return mrb_pq_result_processor(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res);
   } else {
     mrb_sys_fail(mrb, PQresultErrorMessage(res));
   }
@@ -349,7 +354,7 @@ mrb_PQdescribePortal(mrb_state *mrb, mrb_value self)
   errno = 0;
   PGresult *res = PQdescribePortal(conn, portalName);
   if (likely(res)) {
-    return mrb_pq_result_processor(mrb, mrb_obj_class(mrb, self), res);
+    return mrb_pq_result_processor(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res);
   } else {
     mrb_sys_fail(mrb, PQresultErrorMessage(res));
   }
@@ -362,7 +367,7 @@ mrb_PQnoticeReceiver(void *arg_, const PGresult *res)
 {
   mrb_PQnoticeReceiver_arg *arg = (mrb_PQnoticeReceiver_arg *) arg_;
   int arena_index = mrb_gc_arena_save(arg->mrb);
-  mrb_yield(arg->mrb, arg->block, mrb_pq_result_processor(arg->mrb, arg->pq_class, res));
+  mrb_yield(arg->mrb, arg->block, mrb_pq_result_processor(arg->mrb, arg->pq_result_class, res));
   mrb_gc_arena_restore(arg->mrb, arena_index);
 }
 
@@ -383,11 +388,12 @@ mrb_PQsetNoticeReceiver(mrb_state *mrb, mrb_value self)
   }
 
   struct RClass *pq_class = mrb_obj_class(mrb, self);
+  struct RClass *pq_result_class = mrb_class_get_under(mrb, pq_class, "Result");
   mrb_PQnoticeReceiver_arg *arg;
   struct RData *notice_receiver_data;
   Data_Make_Struct(mrb, mrb_class_get_under(mrb, pq_class, "NoticeReceiver"), mrb_PQnoticeReceiver_arg, &mrb_PQnoticeReceiver_type, arg, notice_receiver_data);
   arg->mrb = mrb;
-  arg->pq_class = pq_class;
+  arg->pq_result_class = pq_result_class;
   arg->block = block;
   mrb_value notice_receiver = mrb_obj_value(notice_receiver_data);
   mrb_iv_set(mrb, notice_receiver, mrb_intern_lit(mrb, "block"), block);

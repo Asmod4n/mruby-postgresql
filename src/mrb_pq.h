@@ -55,7 +55,7 @@ static const struct mrb_data_type mrb_PGresult_type = {
 
 typedef struct {
   mrb_state *mrb;
-  struct RClass *pq_class;
+  struct RClass *pq_result_class;
   mrb_value block;
 } mrb_PQnoticeReceiver_arg;
 
