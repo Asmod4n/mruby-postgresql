@@ -72,4 +72,4 @@ class Pq
       fnames
     end
   end # class Result
-end
+end # class Pq

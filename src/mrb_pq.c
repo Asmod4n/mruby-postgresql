@@ -11,23 +11,23 @@ mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
   PGconn *conn = NULL;
   MRB_TRY(&c_jmp)
   {
-      mrb->jmp = &c_jmp;
-      errno = 0;
-      conn = PQconnectdb(conninfo);
-      if (unlikely(PQstatus(conn) != CONNECTION_OK)) {
-        mrb_pq_handle_connection_error(mrb, self, conn);
-      }
-      mrb_data_init(self, conn, &mrb_PGconn_type);
+    mrb->jmp = &c_jmp;
+    errno = 0;
+    conn = PQconnectdb(conninfo);
+    if (unlikely(PQstatus(conn) != CONNECTION_OK)) {
+      mrb_pq_handle_connection_error(mrb, self, conn);
+    }
+    mrb_data_init(self, conn, &mrb_PGconn_type);
 #ifdef MRB_UTF8_STRING
-      PQsetClientEncoding(conn, "UTF8");
+    PQsetClientEncoding(conn, "UTF8");
 #endif
-      mrb->jmp = prev_jmp;
+    mrb->jmp = prev_jmp;
   }
   MRB_CATCH(&c_jmp)
   {
-      mrb->jmp = prev_jmp;
-      PQfinish(conn);
-      MRB_THROW(mrb->jmp);
+    mrb->jmp = prev_jmp;
+    PQfinish(conn);
+    MRB_THROW(mrb->jmp);
   }
   MRB_END_EXC(&c_jmp);
 
@@ -92,22 +92,45 @@ mrb_PQrequestCancel(mrb_state *mrb, mrb_value self)
   return mrb_symbol_value(mrb_intern_lit(mrb, "cancel"));
 }
 
-MRB_INLINE const char *
-mrb_pq_encode_text_value(mrb_state *mrb, mrb_value value)
+static const char *
+mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength, int *paramFormat)
 {
   switch(mrb_type(value)) {
     case MRB_TT_FALSE: {
       if (!mrb_fixnum(value)) {
+        *paramType = 0;
+        *paramLength = 0;
+        *paramFormat = 0;
         return NULL;
       } else {
+        *paramType = 16;
+        *paramLength = 1;
+        *paramFormat = 0;
         return "f";
       }
     } break;
     case MRB_TT_TRUE: {
+      *paramType = 16;
+      *paramLength = 1;
+      *paramFormat = 0;
       return "t";
     } break;
+    case MRB_TT_FIXNUM: {
+      *paramFormat = 1;
+      return mrb_pq_encode_fixnum(mrb, value, paramType, paramLength);
+    } break;
+#ifndef MRB_WITHOUT_FLOAT
+    case MRB_TT_FLOAT: {
+      *paramFormat = 1;
+      return mrb_pq_encode_float(mrb, value, paramType, paramLength);
+    } break;
+#endif
     default: {
-      return mrb_string_value_cstr(mrb, &value);
+      value = mrb_str_to_str(mrb, value);
+      *paramType = 0;
+      *paramLength = RSTRING_LEN(value);
+      *paramFormat = 1;
+      return RSTRING_PTR(value);
     }
   }
 }
@@ -210,11 +233,16 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
     int success = FALSE;
     errno = 0;
     if (nParams) {
+      Oid paramTypes[nParams];
       const char *paramValues[nParams];
+      int paramLengths[nParams];
+      int paramFormats[nParams];
+      int arena_index = mrb_gc_arena_save(mrb);
       for (mrb_int i = 0; i < nParams; i++) {
-        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+        paramValues[i] = mrb_pq_encode_value(mrb, paramValues_val[i], &paramTypes[i], &paramLengths[i], &paramFormats[i]);
       }
-      success = PQsendQueryParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
+      success = PQsendQueryParams(conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, 0);
+      mrb_gc_arena_restore(mrb, arena_index);
     } else {
       success = PQsendQuery(conn, command);
     }
@@ -227,11 +255,16 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
     PGresult *res = NULL;
     errno = 0;
     if (nParams) {
+      Oid paramTypes[nParams];
       const char *paramValues[nParams];
+      int paramLengths[nParams];
+      int paramFormats[nParams];
+      int arena_index = mrb_gc_arena_save(mrb);
       for (mrb_int i = 0; i < nParams; i++) {
-        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+        paramValues[i] = mrb_pq_encode_value(mrb, paramValues_val[i], &paramTypes[i], &paramLengths[i], &paramFormats[i]);
       }
-      res = PQexecParams(conn, command, nParams, NULL, paramValues, NULL, NULL, 0);
+      res = PQexecParams(conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, 0);
+      mrb_gc_arena_restore(mrb, arena_index);
     } else {
       res = PQexec(conn, command);
     }
@@ -255,9 +288,8 @@ mrb_PQprepare(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, E_IO_ERROR, "closed stream");
   }
 
-  PGresult *res = NULL;
   errno = 0;
-  res = PQprepare(conn, stmtName, query, 0, NULL);
+  PGresult *res = PQprepare(conn, stmtName, query, 0, NULL);
   if (likely(res)) {
     return mrb_pq_result_processor(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Result"), res);
   } else {
@@ -284,11 +316,16 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
     int success = FALSE;
     errno = 0;
     if (nParams) {
+      Oid paramTypes[nParams];
       const char *paramValues[nParams];
+      int paramLengths[nParams];
+      int paramFormats[nParams];
+      int arena_index = mrb_gc_arena_save(mrb);
       for (mrb_int i = 0; i < nParams; i++) {
-        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+        paramValues[i] = mrb_pq_encode_value(mrb, paramValues_val[i], &paramTypes[i], &paramLengths[i], &paramFormats[i]);
       }
-      success = PQsendQueryPrepared(conn, stmtName, nParams, paramValues, NULL, NULL, 0);
+      success = PQsendQueryPrepared(conn, stmtName, nParams, paramValues, paramLengths, paramFormats, 0);
+      mrb_gc_arena_restore(mrb, arena_index);
     } else {
       success = PQsendQueryPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
     }
@@ -301,11 +338,16 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
     PGresult *res = NULL;
     errno = 0;
     if (nParams) {
+      Oid paramTypes[nParams];
       const char *paramValues[nParams];
+      int paramLengths[nParams];
+      int paramFormats[nParams];
+      int arena_index = mrb_gc_arena_save(mrb);
       for (mrb_int i = 0; i < nParams; i++) {
-        paramValues[i] = mrb_pq_encode_text_value(mrb, paramValues_val[i]);
+        paramValues[i] = mrb_pq_encode_value(mrb, paramValues_val[i], &paramTypes[i], &paramLengths[i], &paramFormats[i]);
       }
-      res = PQexecPrepared(conn, stmtName, nParams, paramValues, NULL, NULL, 0);
+      res = PQexecPrepared(conn, stmtName, nParams, paramValues, paramLengths, paramFormats, 0);
+      mrb_gc_arena_restore(mrb, arena_index);
     } else {
       res = PQexecPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
     }
@@ -407,13 +449,13 @@ mrb_PQsetNoticeReceiver(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_PQntuples(mrb_state *mrb, mrb_value self)
 {
-  return mrb_fixnum_value(PQntuples((const PGresult *) DATA_PTR(self)));
+  return mrb_pq_number_value(mrb, PQntuples((const PGresult *) DATA_PTR(self)));
 }
 
 static mrb_value
 mrb_PQnfields(mrb_state *mrb, mrb_value self)
 {
-  return mrb_fixnum_value(PQnfields((const PGresult *) DATA_PTR(self)));
+  return mrb_pq_number_value(mrb, PQnfields((const PGresult *) DATA_PTR(self)));
 }
 
 static mrb_value
@@ -482,7 +524,7 @@ mrb_PQfformat(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "i", &column_number);
   mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
 
-  return mrb_fixnum_value(PQfformat((const PGresult *) DATA_PTR(self), (int) column_number));
+  return mrb_pq_number_value(mrb, PQfformat((const PGresult *) DATA_PTR(self), (int) column_number));
 }
 
 static mrb_value
@@ -492,7 +534,7 @@ mrb_PQftype(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "i", &column_number);
   mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
 
-  return mrb_fixnum_value(PQftype((const PGresult *) DATA_PTR(self), (int) column_number));
+  return mrb_pq_number_value(mrb, PQftype((const PGresult *) DATA_PTR(self), (int) column_number));
 }
 
 static mrb_value
@@ -502,13 +544,19 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
     case 16: { // bool
       return mrb_bool_value(value[0] == 't');
     } break;
+#if (MRB_INT_BIT >= 64)
     case 20: { // int64_t
       return mrb_fixnum_value(strtoll(value, NULL, 0));
     } break;
+#endif
+#if (MRB_INT_BIT >= 32)
+    case 23: // int32_t
+#endif
+#if (MRB_INT_BIT >= 16)
     case 21: // int16_t
-    case 23: { // int32_t
+#endif
       return mrb_fixnum_value(strtol(value, NULL, 0));
-    } break;
+    break;
     case 114:
     case 3802: {
       if (mrb_class_defined(mrb, "JSON")) {
@@ -524,12 +572,16 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
         goto def;
       }
     } break;
+#ifndef MRB_WITHOUT_FLOAT
     case 700: { // float
       return mrb_float_value(mrb, strtof(value, NULL));
     } break;
+#ifndef MRB_USE_FLOAT
     case 701: { // double
       return mrb_float_value(mrb, strtod(value, NULL));
+#endif
     } break;
+#endif
     default: {
 def:
       return mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number));
@@ -574,7 +626,7 @@ mrb_PQgetisnull(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_PQnparams(mrb_state *mrb, mrb_value self)
 {
-  return mrb_fixnum_value(PQnparams((const PGresult *) DATA_PTR(self)));
+  return mrb_pq_number_value(mrb, PQnparams((const PGresult *) DATA_PTR(self)));
 }
 
 static mrb_value
@@ -584,7 +636,7 @@ mrb_PQparamtype(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "i", &param_number);
   mrb_assert_int_fit(mrb_int, param_number, int, INT_MAX);
 
-  return mrb_fixnum_value(PQparamtype((const PGresult *) DATA_PTR(self), (int) param_number));
+  return mrb_pq_number_value(mrb, PQparamtype((const PGresult *) DATA_PTR(self), (int) param_number));
 }
 
 static mrb_value
@@ -605,6 +657,7 @@ mrb_PQresultErrorField(mrb_state *mrb, mrb_value self)
 void
 mrb_mruby_postgresql_gem_init(mrb_state *mrb)
 {
+  mrb_pq_is_bigendian = bigendian_p();
   struct RClass *pq_class, *pq_error_class, *pq_result_mixins, *pq_result_class, *pq_result_error_class, *pq_notice_processor_class;
   pq_class = mrb_define_class(mrb, "Pq", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
