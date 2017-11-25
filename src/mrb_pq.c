@@ -208,6 +208,7 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
   MRB_CATCH(&c_jmp)
   {
     mrb->jmp = prev_jmp;
+    PQrequestCancel(conn);
     while ((res = PQgetResult(conn))) {
       PQclear(res);
     }
@@ -481,7 +482,7 @@ mrb_PQfnumber(mrb_state *mrb, mrb_value self)
 
   int fnumber = PQfnumber((const PGresult *) DATA_PTR(self), column_name);
   if (fnumber != -1) {
-    return mrb_fixnum_value(fnumber);
+    return mrb_pq_number_value(mrb, fnumber);
   } else {
     return mrb_nil_value();
   }
@@ -499,7 +500,7 @@ mrb_PQftable(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "InvalidOid"), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
-  return mrb_fixnum_value(foo);
+  return mrb_pq_number_value(mrb, foo);
 }
 
 static mrb_value
@@ -514,7 +515,7 @@ mrb_PQftablecol(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
-  return mrb_fixnum_value(foo);
+  return mrb_pq_number_value(mrb, foo);
 }
 
 static mrb_value
@@ -544,18 +545,12 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
     case 16: { // bool
       return mrb_bool_value(value[0] == 't');
     } break;
-#if (MRB_INT_BIT >= 64)
     case 20: { // int64_t
-      return mrb_fixnum_value(strtoll(value, NULL, 0));
+      return mrb_pq_number_value(mrb, strtoll(value, NULL, 0));
     } break;
-#endif
-#if (MRB_INT_BIT >= 32)
     case 23: // int32_t
-#endif
-#if (MRB_INT_BIT >= 16)
     case 21: // int16_t
-#endif
-      return mrb_fixnum_value(strtol(value, NULL, 0));
+      return mrb_pq_number_value(mrb, strtol(value, NULL, 0));
     break;
     case 114:
     case 3802: {

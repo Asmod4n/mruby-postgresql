@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #ifndef E_IO_ERROR
 #define E_IO_ERROR (mrb_exc_get(mrb, "IOError"))
@@ -65,7 +66,7 @@ mrb_pq_handle_connection_error(mrb_state *mrb, mrb_value self, const PGconn *con
 }
 
 MRB_INLINE mrb_value
-mrb_pq_number_value(mrb_state *mrb, int64_t number)
+mrb_pq_number_value(mrb_state *mrb, intmax_t number)
 {
   if (FIXABLE(number)) {
     return mrb_fixnum_value(number);
@@ -100,9 +101,12 @@ mrb_pq_encode_fixnum(mrb_state *mrb, mrb_value value, Oid *paramType, int *param
   uint8_t *dst = (uint8_t *) RSTRING_PTR(str);
   if (mrb_pq_is_bigendian) {
     memcpy(dst, &number, sizeof(number));
-  } else for (int i = sizeof(number) - 1;i >= 0; i--) {
-    dst[i] = (uint8_t) number;
-    number >>= 8;
+  } else {
+    for (int i = sizeof(number) - 1;i > 0; i--) {
+      dst[i] = (uint8_t) number;
+      number >>= 8;
+    }
+    dst[0] = (uint8_t) number;
   }
 
   return RSTRING_PTR(str);
@@ -110,7 +114,7 @@ mrb_pq_encode_fixnum(mrb_state *mrb, mrb_value value, Oid *paramType, int *param
 
 #ifndef MRB_WITHOUT_FLOAT
 #if (defined(MRB_USE_FLOAT) && MRB_INT_BIT != 32)||(MRB_INT_BIT != 64)
-#error "mruby-postgresql: size of mrb_float and mrb_int differ, cannot pack floats. (define MRB_INT64 by default, MRB_INT32 when MRB_USE_FLOAT in <mrbconf.h>)"
+#error "mruby-postgresql: size of mrb_float and mrb_int differ, cannot pack floats. (define MRB_INT64 when MRB_USE_FLOAT isn't defined, MRB_INT32 when MRB_USE_FLOAT is defined <mrbconf.h>)"
 #endif
 static const char *
 mrb_pq_encode_float(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength)
@@ -133,9 +137,12 @@ mrb_pq_encode_float(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
   uint8_t *dst = (uint8_t *) RSTRING_PTR(str);
   if (mrb_pq_is_bigendian) {
     memcpy(dst, &swap.i, sizeof(swap));
-  } else for (int i = sizeof(swap) - 1;i >= 0; i--) {
-    dst[i] = (uint8_t) swap.i;
-    swap.i >>= 8;
+  } else {
+    for (int i = sizeof(swap) - 1;i > 0; i--) {
+      dst[i] = (uint8_t) swap.i;
+      swap.i >>= 8;
+    }
+    dst[0] = (uint8_t) swap.i;
   }
 
   return RSTRING_PTR(str);
