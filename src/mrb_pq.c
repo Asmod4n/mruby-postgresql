@@ -72,7 +72,12 @@ mrb_PQsocket(mrb_state *mrb, mrb_value self)
   if (unlikely(socket == -1)) {
     mrb_pq_handle_connection_error(mrb, self, conn);
   }
-  return mrb_fixnum_value(socket);
+
+  if (POSFIXABLE(socket)) {
+    return mrb_fixnum_value(socket);
+  } else {
+    mrb_raise(mrb, E_RANGE_ERROR, "socket value too large");
+  }
 }
 
 static mrb_value
@@ -230,9 +235,9 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, E_IO_ERROR, "closed stream");
   }
 
+  errno = 0;
   if (mrb_type(block) == MRB_TT_PROC) {
     int success = FALSE;
-    errno = 0;
     if (nParams) {
       Oid paramTypes[nParams];
       const char *paramValues[nParams];
@@ -254,7 +259,6 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
     }
   } else {
     PGresult *res = NULL;
-    errno = 0;
     if (nParams) {
       Oid paramTypes[nParams];
       const char *paramValues[nParams];
@@ -313,9 +317,9 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, E_IO_ERROR, "closed stream");
   }
 
+  errno = 0;
   if (mrb_type(block) == MRB_TT_PROC) {
     int success = FALSE;
-    errno = 0;
     if (nParams) {
       Oid paramTypes[nParams];
       const char *paramValues[nParams];
@@ -337,7 +341,6 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
     }
   } else {
     PGresult *res = NULL;
-    errno = 0;
     if (nParams) {
       Oid paramTypes[nParams];
       const char *paramValues[nParams];
