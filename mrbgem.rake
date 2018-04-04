@@ -4,6 +4,8 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
   spec.summary = 'Postgresql adapter for mruby'
   spec.add_dependency 'mruby-errno'
 
+  next if spec.respond_to?(:search_package) && spec.search_package('libpq')
+
   create_build_dir_cmd = "mkdir -p #{spec.build_dir}/build && cd #{spec.build_dir}/build"
   configure_cmd = "#{spec.dir}/deps/postgresql/configure CC=#{spec.cc.command} CFLAGS=\"#{spec.cc.flags.join(' ')}\" LDFLAGS=\"#{spec.linker.flags.join(' ')}\" CXX=#{spec.cxx.command} CXXFLAGS=\"#{spec.cxx.flags.join(' ')}\" --prefix=#{spec.build_dir}"
   build_cmd = "cd src/interfaces/libpq && make -j4 && make install && cd #{spec.build_dir}/build/src/backend && make -j4 generated-headers && cd #{spec.build_dir}/build/src/include && make install"
