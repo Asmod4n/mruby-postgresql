@@ -1,0 +1,17 @@
+sudo: required
+dist: trusty
+addons:
+  apt:
+    packages:
+      - ruby-dev
+language: c
+compiler:
+  - gcc
+  - clang
+script:
+  - rake test
+os:
+  - linux
+  - osx
+services:
+  - postgresql

@@ -79,8 +79,6 @@ mrb_pq_number_value(mrb_state *mrb, intmax_t number)
   }
 }
 
-static int mrb_pq_is_bigendian;
-
 static const char *
 mrb_pq_encode_fixnum(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength)
 {
@@ -99,15 +97,11 @@ mrb_pq_encode_fixnum(mrb_state *mrb, mrb_value value, Oid *paramType, int *param
   *paramLength = sizeof(number);
 
   uint8_t *dst = (uint8_t *) RSTRING_PTR(str);
-  if (mrb_pq_is_bigendian) {
-    memcpy(dst, &number, sizeof(number));
-  } else {
-    for (int i = sizeof(number) - 1;i > 0; i--) {
-      dst[i] = (uint8_t) number;
-      number >>= 8;
-    }
-    dst[0] = (uint8_t) number;
+  for (int i = sizeof(number) - 1;i > 0; i--) {
+    dst[i] = (uint8_t) number;
+    number >>= 8;
   }
+  dst[0] = (uint8_t) number;
 
   return RSTRING_PTR(str);
 }
@@ -135,15 +129,11 @@ mrb_pq_encode_float(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
   *paramLength = sizeof(swap);
 
   uint8_t *dst = (uint8_t *) RSTRING_PTR(str);
-  if (mrb_pq_is_bigendian) {
-    memcpy(dst, &swap.i, sizeof(swap));
-  } else {
-    for (int i = sizeof(swap) - 1;i > 0; i--) {
-      dst[i] = (uint8_t) swap.i;
-      swap.i >>= 8;
-    }
-    dst[0] = (uint8_t) swap.i;
+  for (int i = sizeof(swap) - 1;i > 0; i--) {
+    dst[i] = (uint8_t) swap.i;
+    swap.i >>= 8;
   }
+  dst[0] = (uint8_t) swap.i;
 
   return RSTRING_PTR(str);
 }

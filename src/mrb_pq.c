@@ -558,14 +558,14 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
     case 114:
     case 3802: {
       if (mrb_class_defined(mrb, "JSON")) {
-        return mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "JSON")), "parse", 1, mrb_str_new_static(mrb, value, PQgetlength(result, row_number, column_number)));
+        return mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "JSON")), "parse", 1, mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number)));
       } else {
         goto def;
       }
     } break;
     case 142: {
       if (mrb_class_defined(mrb, "XML")) {
-        return mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "XML")), "parse", 1, mrb_str_new_static(mrb, value, PQgetlength(result, row_number, column_number)));
+        return mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "XML")), "parse", 1, mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number)));
       } else {
         goto def;
       }
@@ -655,7 +655,6 @@ mrb_PQresultErrorField(mrb_state *mrb, mrb_value self)
 void
 mrb_mruby_postgresql_gem_init(mrb_state *mrb)
 {
-  mrb_pq_is_bigendian = bigendian_p();
   struct RClass *pq_class, *pq_error_class, *pq_result_mixins, *pq_result_class, *pq_result_error_class, *pq_notice_processor_class;
   pq_class = mrb_define_class(mrb, "Pq", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
