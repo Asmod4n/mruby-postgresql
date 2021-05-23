@@ -15,3 +15,7 @@ os:
   - osx
 services:
   - postgresql
+addons:
+  homebrew:
+    packages:
+    - postgresql
