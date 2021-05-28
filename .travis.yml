@@ -12,10 +12,5 @@ script:
   - rake test
 os:
   - linux
-  - osx
 services:
   - postgresql
-addons:
-  homebrew:
-    packages:
-    - postgresql
