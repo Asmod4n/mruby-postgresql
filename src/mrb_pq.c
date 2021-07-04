@@ -73,11 +73,7 @@ mrb_PQsocket(mrb_state *mrb, mrb_value self)
     mrb_pq_handle_connection_error(mrb, self, conn);
   }
 
-  if (POSFIXABLE(socket)) {
-    return mrb_fixnum_value(socket);
-  } else {
-    mrb_raise(mrb, E_RANGE_ERROR, "socket value too large");
-  }
+  return mrb_int_value(mrb, socket);
 }
 
 static mrb_value
@@ -102,7 +98,7 @@ mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
 {
   switch(mrb_type(value)) {
     case MRB_TT_FALSE: {
-      if (!mrb_fixnum(value)) {
+      if (!mrb_integer(value)) {
         *paramType = 0;
         *paramLength = 0;
         *paramFormat = 0;
@@ -120,9 +116,9 @@ mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
       *paramFormat = 0;
       return "t";
     } break;
-    case MRB_TT_FIXNUM: {
+    case MRB_TT_INTEGER: {
       *paramFormat = 1;
-      return mrb_pq_encode_fixnum(mrb, value, paramType, paramLength);
+      return mrb_pq_encode_integer(mrb, value, paramType, paramLength);
     } break;
 #ifndef MRB_WITHOUT_FLOAT
     case MRB_TT_FLOAT: {
@@ -165,7 +161,7 @@ mrb_pq_result_processor(mrb_state *mrb, struct RClass *pq_result_class, PGresult
       } break;
       default: {
         return_val = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, pq_result_class));
-        mrb_iv_set(mrb, return_val, mrb_intern_lit(mrb, "@status"), mrb_fixnum_value(PQresultStatus(res)));
+        mrb_iv_set(mrb, return_val, mrb_intern_lit(mrb, "@status"), mrb_int_value(mrb, PQresultStatus(res)));
       }
     }
     mrb_data_init(return_val, res, &mrb_PGresult_type);
@@ -453,13 +449,13 @@ mrb_PQsetNoticeReceiver(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_PQntuples(mrb_state *mrb, mrb_value self)
 {
-  return mrb_pq_number_value(mrb, PQntuples((const PGresult *) DATA_PTR(self)));
+  return mrb_int_value(mrb, PQntuples((const PGresult *) DATA_PTR(self)));
 }
 
 static mrb_value
 mrb_PQnfields(mrb_state *mrb, mrb_value self)
 {
-  return mrb_pq_number_value(mrb, PQnfields((const PGresult *) DATA_PTR(self)));
+  return mrb_int_value(mrb, PQnfields((const PGresult *) DATA_PTR(self)));
 }
 
 static mrb_value
@@ -485,7 +481,7 @@ mrb_PQfnumber(mrb_state *mrb, mrb_value self)
 
   int fnumber = PQfnumber((const PGresult *) DATA_PTR(self), column_name);
   if (fnumber != -1) {
-    return mrb_pq_number_value(mrb, fnumber);
+    return mrb_int_value(mrb, fnumber);
   } else {
     return mrb_nil_value();
   }
@@ -503,7 +499,7 @@ mrb_PQftable(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "InvalidOid"), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
-  return mrb_pq_number_value(mrb, foo);
+  return mrb_int_value(mrb, foo);
 }
 
 static mrb_value
@@ -518,7 +514,7 @@ mrb_PQftablecol(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "Error"), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
-  return mrb_pq_number_value(mrb, foo);
+  return mrb_int_value(mrb, foo);
 }
 
 static mrb_value
@@ -528,7 +524,7 @@ mrb_PQfformat(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "i", &column_number);
   mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
 
-  return mrb_pq_number_value(mrb, PQfformat((const PGresult *) DATA_PTR(self), (int) column_number));
+  return mrb_int_value(mrb, PQfformat((const PGresult *) DATA_PTR(self), (int) column_number));
 }
 
 static mrb_value
@@ -538,7 +534,7 @@ mrb_PQftype(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "i", &column_number);
   mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
 
-  return mrb_pq_number_value(mrb, PQftype((const PGresult *) DATA_PTR(self), (int) column_number));
+  return mrb_int_value(mrb, PQftype((const PGresult *) DATA_PTR(self), (int) column_number));
 }
 
 static mrb_value
@@ -549,11 +545,11 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
       return mrb_bool_value(value[0] == 't');
     } break;
     case 20: { // int64_t
-      return mrb_pq_number_value(mrb, strtoll(value, NULL, 0));
+      return mrb_int_value(mrb, strtoll(value, NULL, 0));
     } break;
     case 23: // int32_t
     case 21: // int16_t
-      return mrb_pq_number_value(mrb, strtol(value, NULL, 0));
+      return mrb_int_value(mrb, strtol(value, NULL, 0));
     break;
     case 114:
     case 3802: {
@@ -624,7 +620,7 @@ mrb_PQgetisnull(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_PQnparams(mrb_state *mrb, mrb_value self)
 {
-  return mrb_pq_number_value(mrb, PQnparams((const PGresult *) DATA_PTR(self)));
+  return mrb_int_value(mrb, PQnparams((const PGresult *) DATA_PTR(self)));
 }
 
 static mrb_value
@@ -634,7 +630,7 @@ mrb_PQparamtype(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "i", &param_number);
   mrb_assert_int_fit(mrb_int, param_number, int, INT_MAX);
 
-  return mrb_pq_number_value(mrb, PQparamtype((const PGresult *) DATA_PTR(self), (int) param_number));
+  return mrb_int_value(mrb, PQparamtype((const PGresult *) DATA_PTR(self), (int) param_number));
 }
 
 static mrb_value
@@ -676,16 +672,16 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   pq_notice_processor_class = mrb_define_class_under(mrb, pq_class, "NoticeReceiver", mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_notice_processor_class, MRB_TT_DATA);
   pq_result_mixins = mrb_define_module_under(mrb, pq_class, "ResultMixins");
-  mrb_define_const(mrb, pq_result_mixins, "EMPTY_QUERY", mrb_fixnum_value(PGRES_EMPTY_QUERY));
-  mrb_define_const(mrb, pq_result_mixins, "COMMAND_OK", mrb_fixnum_value(PGRES_COMMAND_OK));
-  mrb_define_const(mrb, pq_result_mixins, "TUPLES_OK", mrb_fixnum_value(PGRES_TUPLES_OK));
-  mrb_define_const(mrb, pq_result_mixins, "COPY_OUT", mrb_fixnum_value(PGRES_COPY_OUT));
-  mrb_define_const(mrb, pq_result_mixins, "COPY_IN", mrb_fixnum_value(PGRES_COPY_IN));
-  mrb_define_const(mrb, pq_result_mixins, "BAD_RESPONSE", mrb_fixnum_value(PGRES_BAD_RESPONSE));
-  mrb_define_const(mrb, pq_result_mixins, "NONFATAL_ERROR", mrb_fixnum_value(PGRES_NONFATAL_ERROR));
-  mrb_define_const(mrb, pq_result_mixins, "FATAL_ERROR", mrb_fixnum_value(PGRES_FATAL_ERROR));
-  mrb_define_const(mrb, pq_result_mixins, "COPY_BOTH", mrb_fixnum_value(PGRES_COPY_BOTH));
-  mrb_define_const(mrb, pq_result_mixins, "SINGLE_TUPLE", mrb_fixnum_value(PGRES_SINGLE_TUPLE));
+  mrb_define_const(mrb, pq_result_mixins, "EMPTY_QUERY", mrb_int_value(mrb, PGRES_EMPTY_QUERY));
+  mrb_define_const(mrb, pq_result_mixins, "COMMAND_OK", mrb_int_value(mrb, PGRES_COMMAND_OK));
+  mrb_define_const(mrb, pq_result_mixins, "TUPLES_OK", mrb_int_value(mrb, PGRES_TUPLES_OK));
+  mrb_define_const(mrb, pq_result_mixins, "COPY_OUT", mrb_int_value(mrb, PGRES_COPY_OUT));
+  mrb_define_const(mrb, pq_result_mixins, "COPY_IN", mrb_int_value(mrb, PGRES_COPY_IN));
+  mrb_define_const(mrb, pq_result_mixins, "BAD_RESPONSE", mrb_int_value(mrb, PGRES_BAD_RESPONSE));
+  mrb_define_const(mrb, pq_result_mixins, "NONFATAL_ERROR", mrb_int_value(mrb, PGRES_NONFATAL_ERROR));
+  mrb_define_const(mrb, pq_result_mixins, "FATAL_ERROR", mrb_int_value(mrb, PGRES_FATAL_ERROR));
+  mrb_define_const(mrb, pq_result_mixins, "COPY_BOTH", mrb_int_value(mrb, PGRES_COPY_BOTH));
+  mrb_define_const(mrb, pq_result_mixins, "SINGLE_TUPLE", mrb_int_value(mrb, PGRES_SINGLE_TUPLE));
   mrb_define_method(mrb, pq_result_mixins, "ntuples", mrb_PQntuples, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_result_mixins, "nfields", mrb_PQnfields, MRB_ARGS_NONE());
   mrb_define_method(mrb, pq_result_mixins, "fname", mrb_PQfname, MRB_ARGS_REQ(1));
@@ -705,39 +701,39 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   MRB_SET_INSTANCE_TT(pq_result_error_class, MRB_TT_DATA);
   mrb_include_module(mrb, pq_result_error_class, pq_result_mixins);
   mrb_define_method(mrb, pq_result_error_class, "field", mrb_PQresultErrorField, MRB_ARGS_REQ(1));
-  mrb_define_const(mrb, pq_result_error_class, "SEVERITY", mrb_fixnum_value(PG_DIAG_SEVERITY));
-  mrb_define_const(mrb, pq_result_error_class, "SQLSTATE", mrb_fixnum_value(PG_DIAG_SQLSTATE));
-  mrb_define_const(mrb, pq_result_error_class, "MESSAGE_PRIMARY", mrb_fixnum_value(PG_DIAG_MESSAGE_PRIMARY));
-  mrb_define_const(mrb, pq_result_error_class, "MESSAGE_DETAIL", mrb_fixnum_value(PG_DIAG_MESSAGE_DETAIL));
-  mrb_define_const(mrb, pq_result_error_class, "MESSAGE_HINT", mrb_fixnum_value(PG_DIAG_MESSAGE_HINT));
-  mrb_define_const(mrb, pq_result_error_class, "STATEMENT_POSITION", mrb_fixnum_value(PG_DIAG_STATEMENT_POSITION));
-  mrb_define_const(mrb, pq_result_error_class, "CONTEXT", mrb_fixnum_value(PG_DIAG_CONTEXT));
-  mrb_define_const(mrb, pq_result_error_class, "SOURCE_FILE", mrb_fixnum_value(PG_DIAG_SOURCE_FILE));
-  mrb_define_const(mrb, pq_result_error_class, "SOURCE_LINE", mrb_fixnum_value(PG_DIAG_SOURCE_LINE));
-  mrb_define_const(mrb, pq_result_error_class, "SOURCE_FUNCTION", mrb_fixnum_value(PG_DIAG_SOURCE_FUNCTION));
+  mrb_define_const(mrb, pq_result_error_class, "SEVERITY", mrb_int_value(mrb, PG_DIAG_SEVERITY));
+  mrb_define_const(mrb, pq_result_error_class, "SQLSTATE", mrb_int_value(mrb, PG_DIAG_SQLSTATE));
+  mrb_define_const(mrb, pq_result_error_class, "MESSAGE_PRIMARY", mrb_int_value(mrb, PG_DIAG_MESSAGE_PRIMARY));
+  mrb_define_const(mrb, pq_result_error_class, "MESSAGE_DETAIL", mrb_int_value(mrb, PG_DIAG_MESSAGE_DETAIL));
+  mrb_define_const(mrb, pq_result_error_class, "MESSAGE_HINT", mrb_int_value(mrb, PG_DIAG_MESSAGE_HINT));
+  mrb_define_const(mrb, pq_result_error_class, "STATEMENT_POSITION", mrb_int_value(mrb, PG_DIAG_STATEMENT_POSITION));
+  mrb_define_const(mrb, pq_result_error_class, "CONTEXT", mrb_int_value(mrb, PG_DIAG_CONTEXT));
+  mrb_define_const(mrb, pq_result_error_class, "SOURCE_FILE", mrb_int_value(mrb, PG_DIAG_SOURCE_FILE));
+  mrb_define_const(mrb, pq_result_error_class, "SOURCE_LINE", mrb_int_value(mrb, PG_DIAG_SOURCE_LINE));
+  mrb_define_const(mrb, pq_result_error_class, "SOURCE_FUNCTION", mrb_int_value(mrb, PG_DIAG_SOURCE_FUNCTION));
 #ifdef PG_DIAG_SEVERITY_NONLOCALIZED
-  mrb_define_const(mrb, pq_result_error_class, "SEVERITY_NONLOCALIZED", mrb_fixnum_value(PG_DIAG_SEVERITY_NONLOCALIZED));
+  mrb_define_const(mrb, pq_result_error_class, "SEVERITY_NONLOCALIZED", mrb_int_value(mrb, PG_DIAG_SEVERITY_NONLOCALIZED));
 #endif
 #ifdef PG_DIAG_INTERNAL_POSITION
-  mrb_define_const(mrb, pq_result_error_class, "INTERNAL_POSITION", mrb_fixnum_value(PG_DIAG_INTERNAL_POSITION));
+  mrb_define_const(mrb, pq_result_error_class, "INTERNAL_POSITION", mrb_int_value(mrb, PG_DIAG_INTERNAL_POSITION));
 #endif
 #ifdef PG_DIAG_INTERNAL_QUERY
-  mrb_define_const(mrb, pq_result_error_class, "INTERNAL_QUERY", mrb_fixnum_value(PG_DIAG_INTERNAL_QUERY));
+  mrb_define_const(mrb, pq_result_error_class, "INTERNAL_QUERY", mrb_int_value(mrb, PG_DIAG_INTERNAL_QUERY));
 #endif
 #ifdef PG_DIAG_SCHEMA_NAME
-  mrb_define_const(mrb, pq_result_error_class, "SCHEMA_NAME", mrb_fixnum_value(PG_DIAG_SCHEMA_NAME));
+  mrb_define_const(mrb, pq_result_error_class, "SCHEMA_NAME", mrb_int_value(mrb, PG_DIAG_SCHEMA_NAME));
 #endif
 #ifdef PG_DIAG_TABLE_NAME
-  mrb_define_const(mrb, pq_result_error_class, "TABLE_NAME", mrb_fixnum_value(PG_DIAG_TABLE_NAME));
+  mrb_define_const(mrb, pq_result_error_class, "TABLE_NAME", mrb_int_value(mrb, PG_DIAG_TABLE_NAME));
 #endif
 #ifdef PG_DIAG_COLUMN_NAME
-  mrb_define_const(mrb, pq_result_error_class, "COLUMN_NAME", mrb_fixnum_value(PG_DIAG_COLUMN_NAME));
+  mrb_define_const(mrb, pq_result_error_class, "COLUMN_NAME", mrb_int_value(mrb, PG_DIAG_COLUMN_NAME));
 #endif
 #ifdef PG_DIAG_DATATYPE_NAME
-  mrb_define_const(mrb, pq_result_error_class, "DATATYPE_NAME", mrb_fixnum_value(PG_DIAG_DATATYPE_NAME));
+  mrb_define_const(mrb, pq_result_error_class, "DATATYPE_NAME", mrb_int_value(mrb, PG_DIAG_DATATYPE_NAME));
 #endif
 #ifdef PG_DIAG_CONSTRAINT_NAME
-  mrb_define_const(mrb, pq_result_error_class, "CONSTRAINT_NAME", mrb_fixnum_value(PG_DIAG_CONSTRAINT_NAME));
+  mrb_define_const(mrb, pq_result_error_class, "CONSTRAINT_NAME", mrb_int_value(mrb, PG_DIAG_CONSTRAINT_NAME));
 #endif
 }
 

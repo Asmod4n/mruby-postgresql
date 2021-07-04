@@ -65,24 +65,10 @@ mrb_pq_handle_connection_error(mrb_state *mrb, mrb_value self, const PGconn *con
   mrb_raise(mrb, mrb_class_get_under(mrb, mrb_obj_class(mrb, self), "ConnectionError"), PQerrorMessage(conn));
 }
 
-MRB_INLINE mrb_value
-mrb_pq_number_value(mrb_state *mrb, intmax_t number)
-{
-  if (FIXABLE(number)) {
-    return mrb_fixnum_value(number);
-  } else {
-#ifndef MRB_WITHOUT_FLOAT
-    return mrb_float_value(mrb, number);
-#else
-    mrb_raise(mrb, E_RANGE_ERROR, "Number too big for Fixnum");
-#endif
-  }
-}
-
 static const char *
-mrb_pq_encode_fixnum(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength)
+mrb_pq_encode_integer(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength)
 {
-  mrb_int number = mrb_fixnum(value);
+  mrb_int number = mrb_integer(value);
   mrb_value str = mrb_str_new(mrb, NULL, sizeof(number));
 
 #if (MRB_INT_BIT == 64)
