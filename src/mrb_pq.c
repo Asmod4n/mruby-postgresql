@@ -178,7 +178,7 @@ mrb_pq_result_processor(mrb_state *mrb, struct RClass *pq_result_class, PGresult
   return return_val;
 }
 
-static void
+static mrb_value
 mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value block)
 {
   int arena_index = mrb_gc_arena_save(mrb);
@@ -216,6 +216,8 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
     MRB_THROW(mrb->jmp);
   }
   MRB_END_EXC(&c_jmp);
+
+  return self;
 }
 
 static mrb_value
@@ -249,7 +251,7 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
       success = PQsendQuery(conn, command);
     }
     if (likely(success)) {
-      mrb_pq_consume_each_row(mrb, self, conn, block);
+      return mrb_pq_consume_each_row(mrb, self, conn, block);
     } else {
       mrb_pq_handle_connection_error(mrb, self, conn);
     }
@@ -331,7 +333,7 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
       success = PQsendQueryPrepared(conn, stmtName, nParams, NULL, NULL, NULL, 0);
     }
     if (likely(success)) {
-      mrb_pq_consume_each_row(mrb, self, conn, block);
+      return mrb_pq_consume_each_row(mrb, self, conn, block);
     } else {
       mrb_pq_handle_connection_error(mrb, self, conn);
     }
