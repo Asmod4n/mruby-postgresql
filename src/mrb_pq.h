@@ -69,21 +69,24 @@ static const char *
 mrb_pq_encode_integer(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength)
 {
   mrb_int number = mrb_integer(value);
-  mrb_value str = mrb_str_new(mrb, NULL, sizeof(number));
+  int size;
 
-#if (MRB_INT_BIT == 64)
-  *paramType = 20;
-#elif (MRB_INT_BIT == 32)
-  *paramType = 23;
-#elif (MRB_INT_BIT == 16)
-  *paramType = 21;
-#else
-#error "mruby-postgresql: unknown MRB_INT_BIT found in <mruby/value.h>"
-#endif
-  *paramLength = sizeof(number);
+  if (number >= INT16_MIN && number <= INT16_MAX) {
+    *paramType = 21; /* int2 */
+    size = 2;
+  } else if (number >= INT32_MIN && number <= INT32_MAX) {
+    *paramType = 23; /* int4 */
+    size = 4;
+  } else {
+    *paramType = 20; /* int8 */
+    size = 8;
+  }
 
+  mrb_value str = mrb_str_new(mrb, NULL, size);
+  *paramLength = size;
   uint8_t *dst = (uint8_t *) RSTRING_PTR(str);
-  for (int i = sizeof(number) - 1;i > 0; i--) {
+
+  for (int i = size - 1; i > 0; i--) {
     dst[i] = (uint8_t) number;
     number >>= 8;
   }
