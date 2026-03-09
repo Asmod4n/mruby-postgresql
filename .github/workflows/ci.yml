@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libpq-dev ruby rake bison
+
+      - name: Cache mruby build
+        uses: actions/cache@v4
+        with:
+          path: mruby
+          key: mruby-${{ hashFiles('build_config.rb') }}
+
+      - name: Run tests
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+        run: rake test

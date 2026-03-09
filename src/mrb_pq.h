@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <mruby/presym.h>
 
 #ifndef E_IO_ERROR
 #define E_IO_ERROR (mrb_exc_get(mrb, "IOError"))
