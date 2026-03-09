@@ -130,7 +130,7 @@ mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
       value = mrb_str_to_str(mrb, value);
       *paramType = 0;
       *paramLength = RSTRING_LEN(value);
-      *paramFormat = 1;
+      *paramFormat = 0;
       return RSTRING_PTR(value);
     }
   }
