@@ -30,6 +30,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y libpq-dev ruby rake bison
 
+      - name: Create PostgreSQL role
+        run: psql -h localhost -U postgres -c "CREATE ROLE runner SUPERUSER LOGIN;"
+
       - name: Cache mruby build
         uses: actions/cache@v4
         with:
@@ -40,4 +43,5 @@ jobs:
         env:
           PGHOST: localhost
           PGPORT: 5432
+          PGUSER: runner
         run: rake test
