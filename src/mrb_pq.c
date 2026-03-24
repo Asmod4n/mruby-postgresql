@@ -119,7 +119,9 @@ mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
     } break;
 #endif
     default: {
+      mrb_gc_protect(mrb, value);
       value = mrb_str_to_str(mrb, value);
+      mrb_gc_protect(mrb, value);
       *paramType = 0;
       *paramLength = RSTRING_LEN(value);
       *paramFormat = 0;
@@ -132,6 +134,7 @@ static mrb_value
 mrb_pq_make_error_result(mrb_state *mrb, struct RClass *klass, PGresult *res)
 {
   mrb_value obj = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, klass));
+  mrb_gc_protect(mrb, obj);
   mrb_iv_set(mrb, obj, MRB_IVSYM(mesg), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
   mrb_iv_set(mrb, obj, MRB_IVSYM(status), mrb_int_value(mrb, PQresultStatus(res)));
   mrb_data_init(obj, res, &mrb_PGresult_type);
@@ -231,11 +234,19 @@ mrb_pq_encode_params(mrb_state *mrb, mrb_value *paramValues_val, mrb_int nParams
   if ((size_t)nParams > SIZE_MAX / sizeof(char *)) {
     mrb_raise(mrb, E_ARGUMENT_ERROR, "too many parameters");
   }
+  mrb_value paramTypes_val = mrb_str_new_capa(mrb, nParams * sizeof(Oid));
+  mrb_gc_protect(mrb, paramTypes_val);
+  mrb_value paramValue_val = mrb_str_new_capa(mrb, nParams * sizeof(char *));
+  mrb_gc_protect(mrb, paramValue_val);
+  mrb_value paramLengths_val = mrb_str_new_capa(mrb, nParams * sizeof(int));
+  mrb_gc_protect(mrb, paramLengths_val);
+  mrb_value paramFormats_val = mrb_str_new_capa(mrb, nParams * sizeof(int));
+  mrb_gc_protect(mrb, paramFormats_val);
 
-  *paramTypes   = (Oid *)        mrb_alloca(mrb, (size_t)nParams * sizeof(Oid));
-  *paramValues  = (const char **)mrb_alloca(mrb, (size_t)nParams * sizeof(char *));
-  *paramLengths = (int *)        mrb_alloca(mrb, (size_t)nParams * sizeof(int));
-  *paramFormats = (int *)        mrb_alloca(mrb, (size_t)nParams * sizeof(int));
+  *paramTypes   = (Oid *)        RSTRING_PTR(paramTypes_val);
+  *paramValues  = (const char **) RSTRING_PTR(paramValue_val);
+  *paramLengths = (int *)        RSTRING_PTR(paramLengths_val);
+  *paramFormats = (int *)        RSTRING_PTR(paramFormats_val);
 
   for (mrb_int i = 0; i < nParams; i++) {
     (*paramValues)[i] = mrb_pq_encode_value(mrb, paramValues_val[i],

@@ -84,6 +84,7 @@ mrb_pq_encode_integer(mrb_state *mrb, mrb_value value, Oid *paramType, int *para
   }
 
   mrb_value str = mrb_str_new(mrb, NULL, size);
+  mrb_gc_protect(mrb, str);
   *paramLength = size;
   uint8_t *dst = (uint8_t *) RSTRING_PTR(str);
 
@@ -110,6 +111,7 @@ mrb_pq_encode_float(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
 
   swap.f = mrb_float(value);
   mrb_value str = mrb_str_new(mrb, NULL, sizeof(swap));
+  mrb_gc_protect(mrb, str);
 
 #ifdef MRB_USE_FLOAT
   *paramType = 700;
