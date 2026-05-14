@@ -7,7 +7,7 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
   spec.add_dependency 'mruby-metaprog'
 
   # Used by the async-API tests in test/pq.rb for IO.select on the libpq socket.
-  spec.add_test_dependency 'mruby-io'
+  spec.add_test_dependency 'mruby-io', core: 'mruby-io'
 
   unless spec.search_package('libpq')
     # pkg-config either isn't installed or doesn't know about libpq.
@@ -33,8 +33,11 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
 
     candidates = []
     libname    = 'pq'
+    # spec.build.toolchain is an Array of toolchain names (strings), not a
+    # single symbol — `== :visualcpp` is silently always false. Use .include?.
+    is_msvc    = spec.build.toolchain.include?('visualcpp')
 
-    if spec.build.toolchain == :visualcpp
+    if is_msvc
       # MSVC: only one realistic install layout — EDB's Windows installer
       # puts headers and import libs under C:\Program Files\PostgreSQL\<ver>\.
       # Newest version wins.
@@ -44,7 +47,10 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
       end
     else
       # GCC / Clang / MinGW: ask the compiler what target it builds for.
-      triple = `#{spec.build.cc.command} -dumpmachine 2>&1`.strip
+      # `.b` (force binary) avoids encoding-tag crashes on Windows where
+      # backtick output is tagged with the system code page, not UTF-8.
+      # Triples are ASCII so regex matching against the bytes is fine.
+      triple = `#{spec.build.cc.command} -dumpmachine 2>&1`.b.strip
       case triple
       when /darwin/
         # Homebrew keeps libpq keg-only — its .pc file isn't on PKG_CONFIG_PATH
@@ -72,9 +78,39 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
 
     inc, lib = candidates.find { |i, _| File.exist?("#{i}/libpq-fe.h") }
     if inc
-      spec.cc.include_paths     << inc
-      spec.linker.library_paths << lib if File.directory?(lib)
-      spec.linker.libraries     << libname
+      spec.cc.include_paths << inc
+      if is_msvc
+        # mruby's visualcpp toolchain has issues both with `library_paths`
+        # (no quoting, splits at the space in "Program Files") and with
+        # whatever currently makes filename() see a non-string in the
+        # libraries/dependencies map. Sidestep both by passing the full,
+        # quoted path to libpq.lib as a single positional linker arg —
+        # the MSVC linker recognises .lib files directly as input, no
+        # /LIBPATH: needed, no library-name lookup needed.
+        spec.linker.flags_before_libraries << %Q{"#{File.join(lib, 'libpq.lib')}"}
+
+        # On Windows, PostgreSQL's DLLs aren't on the system PATH by
+        # default — the EDB installer doesn't add
+        # `C:\Program Files\PostgreSQL\<ver>\bin`. Anything linked
+        # against libpq.lib then fails to start at run time with
+        # "libpq.dll could not be found" because the imports are
+        # resolved at load. Rake `file` tasks declared in mrbgem.rake
+        # don't get wired into mruby's build graph, so stage the DLLs
+        # eagerly here at gem-setup time — by the time the linker runs
+        # and the test driver invokes mrbtest.exe, the DLLs are already
+        # next to it. Idempotent: re-copies only when the source is newer.
+        pg_bin     = File.expand_path('../bin', lib)
+        target_bin = "#{spec.build.build_dir}/bin"
+        FileUtils.mkdir_p(target_bin)
+        Dir.glob("#{pg_bin}/*.dll").each do |src|
+          dst = "#{target_bin}/#{File.basename(src)}"
+          next if File.exist?(dst) && File.mtime(dst) >= File.mtime(src)
+          FileUtils.cp(src, dst)
+        end
+      else
+        spec.linker.library_paths << lib if File.directory?(lib)
+        spec.linker.libraries     << libname
+      end
     else
       raise "mruby-postgresql: cannot find libpq. " \
             "Tried pkg-config 'libpq' and platform-specific install locations. " \
