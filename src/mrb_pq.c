@@ -772,18 +772,47 @@ mrb_PQnotifies_m(mrb_state *mrb, mrb_value self)
  * end async-aware additions (query execution)
  * =================================================================== */
 
+typedef struct {
+  mrb_PQnoticeReceiver_arg *cb;
+  PGresult *copy;
+} mrb_pq_notice_call_arg;
+
+static mrb_value
+mrb_pq_notice_call(mrb_state *mrb, void *p)
+{
+  mrb_pq_notice_call_arg *a = (mrb_pq_notice_call_arg *) p;
+  return mrb_yield(mrb, a->cb->block,
+    mrb_pq_result_processor(mrb, a->cb->pq_result_class, a->copy));
+}
+
 static void
 mrb_PQnoticeReceiver(void *arg_, const PGresult *res)
 {
   mrb_PQnoticeReceiver_arg *arg = (mrb_PQnoticeReceiver_arg *) arg_;
+
+  /* If a previous notice in the same libpq call already set mrb->exc,
+     skip the rest — the enclosing C wrapper will unwind shortly. */
+  if (arg->mrb->exc) return;
+
   /* libpq frees `res` as soon as this callback returns, but Pq::Result's
      dfree is PQclear — wrapping `res` directly would set up a use-after-
      free at the next GC. Copy so the GC and libpq don't both try to free
      the same buffer. */
   PGresult *copy = PQcopyResult(res, 0);
   if (!copy) return;  /* OOM — drop the notice; libpq frees `res` for us */
+
   mrb_int arena_index = mrb_gc_arena_save(arg->mrb);
-  mrb_yield(arg->mrb, arg->block, mrb_pq_result_processor(arg->mrb, arg->pq_result_class, copy));
+  /* mrb_yield must not raise across libpq's C stack. Wrap it; if the
+     user's block raises, park the exception in mrb->exc and return.
+     The mruby C wrapper that drove this libpq call (mrb_PQexec,
+     mrb_PQconsumeInput_m, …) will return to the VM, which checks
+     mrb->exc on its next opcode and raises naturally. */
+  mrb_pq_notice_call_arg call = { .cb = arg, .copy = copy };
+  mrb_bool err = FALSE;
+  mrb_value caught = mrb_protect_error(arg->mrb, mrb_pq_notice_call, &call, &err);
+  if (err) {
+    arg->mrb->exc = mrb_obj_ptr(caught);
+  }
   mrb_gc_arena_restore(arg->mrb, arena_index);
 }
 

@@ -74,6 +74,11 @@ The block is called for every row of the answer. To cancel mid-stream call
 `conn.cancel` — remaining results are freed. If the block raises an exception
 all remaining results are freed too.
 
+Note that this form still drives `PQgetResult` synchronously under the hood:
+it streams in single-row mode, but the calling thread still blocks on the
+socket. For true non-blocking row streaming use `send_query` + `set_single_row_mode`
+(see the async section below).
+
 Error results are `Exception` objects but are **not** raised; you must handle
 them yourself. All result errors are a subclass of `Pq::Result::Error`.
 
@@ -118,3 +123,165 @@ res.ftype(column_number)             # OID of the column's data type
 res.getvalue(row_number, column_number)    # single field value
 res.getisnull(row_number, column_number)   # true if field is NULL
 ```
+
+
+Notice receivers
+----------------
+Register a block to be called whenever PostgreSQL emits a notice or warning:
+```ruby
+conn.notice_receiver do |notice|
+  warn notice.message_primary
+end
+```
+The block receives a `Pq::Result::NonFatalError` (or similar) wrapping a
+private copy of the notice — libpq's own buffer is freed as soon as the
+callback returns, so the copy is what keeps it alive on the Ruby side.
+
+The block runs inside a libpq C callback, so a raise out of it cannot
+unwind directly (longjmp across libpq's stack is undefined behaviour).
+Instead, the exception is caught locally and parked in `mrb->exc`; the
+enclosing mruby C wrapper (`exec`, `consume_input`, whatever was driving
+libpq when the notice fired) returns to the VM, which raises naturally on
+its next opcode. From the caller's point of view a block raise in
+`notice_receiver` looks identical to a raise from regular code, with the
+exception surfacing at the call site that triggered the notice.
+
+Subsequent notices in the same libpq call are skipped once an exception
+is pending, so the first raise wins.
+
+
+Asynchronous / event-loop integration
+-------------------------------------
+The methods above (`Pq.new`, `exec`, `prepare`, `exec_prepared`, …) all do
+their I/O synchronously and will stall an event loop while waiting for the
+server. For non-blocking use the gem also exposes thin wrappers around
+libpq's async API.
+
+The pattern is always:
+
+1. Initiate work with a non-blocking call (`connect_start`, `send_query`, …).
+2. Drive the socket with `flush` (write side) and `consume_input` (read
+   side), waking up via `conn.socket` when your event loop says it is
+   readable or writable.
+3. Pull completed results out with `get_result` until it returns `nil`.
+
+### Async connect
+
+```ruby
+conn = Pq.connect_start("postgresql://localhost/postgres")
+loop do
+  case conn.connect_poll
+  when :ok      then break
+  when :failed  then raise Pq::ConnectionError, conn.error_message
+  when :reading then your_loop.wait_readable(conn.socket)
+  when :writing then your_loop.wait_writable(conn.socket)
+  end
+end
+```
+
+`connect_start` accepts the same URL string as `Pq.new` (`postgresql://…`).
+It returns an instance whose underlying `PGconn` is mid-handshake; the Ruby
+`#initialize` is **not** called on it, so the synchronous `PQconnectdb`
+path is bypassed entirely.
+
+### Async query
+
+```ruby
+conn.nonblocking = true
+conn.send_query("select * from foo where id = $1", 42)
+
+# Push outgoing data onto the socket
+while (r = conn.flush) != 0
+  your_loop.wait_writable(conn.socket)
+end
+
+# Read incoming results
+loop do
+  while conn.busy?
+    your_loop.wait_readable(conn.socket)
+    conn.consume_input
+  end
+  res = conn.get_result
+  break if res.nil?            # nil = all results drained
+  # handle res …
+end
+```
+
+After `send_query` returns, `get_result` must keep being called until it
+returns `nil`, even if you only expected one result. This matters for
+multi-statement queries (`"select 1; select 2"` yields two results) and for
+the trailing `TUPLES_OK` marker in single-row mode.
+
+`flush` returns `0` when fully flushed and `1` when data is still queued;
+`-1` raises.
+
+### A concrete event loop with IO.select
+
+If `mruby-io` is available, `IO.select` is the simplest wakeup mechanism.
+The fd belongs to libpq, so flip `autoclose = false` on the wrapper to
+keep the IO finalizer from closing it out from under us:
+
+```ruby
+io = IO.for_fd(conn.socket)
+io.autoclose = false
+
+# wait_readable / wait_writable equivalents:
+IO.select([io], nil, nil, timeout)   # readable
+IO.select(nil, [io], nil, timeout)   # writable
+```
+
+Substitute these `IO.select` calls for the `your_loop.wait_*` lines in the
+examples above.
+
+### Streaming rows
+
+Call `conn.set_single_row_mode` immediately after `send_query` (and before
+the first `get_result`) to receive one `Pq::Result` per row instead of one
+buffered `Pq::Result` for the whole query. The end of the stream is marked
+by a zero-row `Pq::Result`; skip it with `next if res.ntuples == 0`.
+
+### LISTEN / NOTIFY
+
+```ruby
+conn.exec("LISTEN events")
+loop do
+  your_loop.wait_readable(conn.socket)
+  conn.consume_input
+  while (n = conn.notifies)
+    puts "#{n.relname} from pid #{n.be_pid}: #{n.extra}"
+  end
+end
+```
+
+`n` is a `Pq::Notify` with `relname`, `be_pid`, and `extra` accessors.
+
+### Method reference
+
+| Method                                | Wraps                       |
+|---------------------------------------|-----------------------------|
+| `Pq.connect_start(url = "")`          | `PQconnectStart`            |
+| `conn.connect_poll`                   | `PQconnectPoll`             |
+| `conn.status`                         | `PQstatus`                  |
+| `conn.error_message`                  | `PQerrorMessage`            |
+| `conn.nonblocking = bool`             | `PQsetnonblocking`          |
+| `conn.nonblocking?`                   | `PQisnonblocking`           |
+| `conn.send_query(sql, *args)`         | `PQsendQuery` / `PQsendQueryParams`     |
+| `conn.send_prepare(name, sql)`        | `PQsendPrepare`             |
+| `conn.send_query_prepared(name, ...)` | `PQsendQueryPrepared`       |
+| `conn.send_describe_prepared(name)`   | `PQsendDescribePrepared`    |
+| `conn.send_describe_portal(portal)`   | `PQsendDescribePortal`      |
+| `conn.flush`                          | `PQflush`                   |
+| `conn.consume_input`                  | `PQconsumeInput`            |
+| `conn.busy?`                          | `PQisBusy`                  |
+| `conn.get_result`                     | `PQgetResult`               |
+| `conn.set_single_row_mode`            | `PQsetSingleRowMode`        |
+| `conn.notifies`                       | `PQnotifies`                |
+
+`connect_poll` returns `:reading`, `:writing`, `:ok`, or `:failed`. (libpq
+also defines a deprecated `:active` state; the gem exposes it for
+completeness but it never appears on modern libpq.)
+
+`status` returns symbols matching the libpq `CONNECTION_*` names in
+lowercase: `:ok`, `:bad`, `:started`, `:made`, `:awaiting_response`,
+`:auth_ok`, `:setenv`, `:ssl_startup`, `:needed`. Newer libpq states fall
+through to the underlying integer.
