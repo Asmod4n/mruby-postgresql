@@ -37,12 +37,59 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
     # single symbol — `== :visualcpp` is silently always false. Use .include?.
     is_msvc    = spec.build.toolchain.include?('visualcpp')
 
-    if is_msvc
-      # MSVC: only one realistic install layout — EDB's Windows installer
-      # puts headers and import libs under C:\Program Files\PostgreSQL\<ver>\.
-      # Newest version wins.
-      libname = 'libpq'
+    # On Windows, the EDB installer writes each install's base directory
+    # to HKLM\SOFTWARE\PostgreSQL\Installations\postgresql-x64-<ver>.
+    # Querying that is more reliable than globbing C:\Program Files —
+    # picks up installs on other drives, gives us authoritative version
+    # ordering, and explicitly tells us "no Postgres installed" rather
+    # than guessing from the absence of a directory. Falls back to the
+    # glob for installs that skipped the registry (rare: manual extract,
+    # portable copy, third-party packager).
+    require 'open3'
+    windows_pg_roots = lambda do
+      roots = []
+
+      out, status = Open3.capture2(
+        'reg', 'query',
+        'HKLM\SOFTWARE\PostgreSQL\Installations',
+        '/reg:64'
+      )
+
+      if status.success?
+        installs = []
+        out.lines.each do |line|
+          line = line.strip
+          # Subkey names look like ...\postgresql-x64-18. Capture the version
+          # for ordering — registry enumeration order isn't guaranteed.
+          next unless line =~ %r{\\postgresql-x64-(\d+)$}
+          version = $1.to_i
+
+          detail, dstatus = Open3.capture2(
+            'reg', 'query', line, '/v', 'Base Directory', '/reg:64'
+          )
+          next unless dstatus.success?
+
+          if detail =~ /Base Directory\s+REG_SZ\s+(.+)/i
+            installs << [version, $1.strip.tr('\\', '/')]
+          end
+        end
+        roots.concat(installs.sort_by { |v, _| -v }.map { |_, r| r })
+      end
+
+      # Supplement with glob; default installs show up in both places, but
+      # the include?-guard keeps the list deduped.
       Dir.glob('C:/Program Files/PostgreSQL/*').sort.reverse.each do |root|
+        roots << root unless roots.include?(root)
+      end
+
+      roots
+    end
+
+    if is_msvc
+      # MSVC always means EDB-installed Postgres on Windows; the import
+      # library is called libpq.lib rather than libpq.a.
+      libname = 'libpq'
+      windows_pg_roots.call.each do |root|
         candidates << ["#{root}/include", "#{root}/lib"]
       end
     else
@@ -60,8 +107,9 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
           ['/usr/local/opt/libpq/include',    '/usr/local/opt/libpq/lib'],      # Intel
         ]
       when /mingw|cygwin/
-        # Native MinGW build against an EDB-installed Postgres.
-        Dir.glob('C:/Program Files/PostgreSQL/*').sort.reverse.each do |root|
+        # Native MinGW build against an EDB-installed Postgres — same
+        # discovery as MSVC, since the install layout is identical.
+        windows_pg_roots.call.each do |root|
           candidates << ["#{root}/include", "#{root}/lib"]
         end
       else
