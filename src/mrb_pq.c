@@ -8,17 +8,16 @@ mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
 
   errno = 0;
   PGconn *conn = PQconnectdb(conninfo);
-  if (unlikely(PQstatus(conn) != CONNECTION_OK)) {
-    /* Build the exception before mrb_data_init so the GC finalizer won't
-       double-free conn. ConnectionError inherits from RuntimeError and is
-       MRB_TT_OBJECT, so mrb_exc_new_str is correct here. */
-    mrb_value err = mrb_exc_new_str(mrb,
-      mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(ConnectionError)),
-      mrb_str_new_cstr(mrb, PQerrorMessage(conn)));
-    PQfinish(conn);
-    mrb_exc_raise(mrb, err);
+  if (unlikely(!conn)) {
+    /* libpq's malloc failed. We can't allocate a fresh exception either —
+       raise mruby's pre-allocated NoMemoryError. */
+    mrb_exc_raise(mrb, mrb_obj_value(mrb->nomem_err));
   }
   mrb_data_init(self, conn, &mrb_PGconn_type);
+  if (unlikely(PQstatus(conn) != CONNECTION_OK)) {
+    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(ConnectionError)),
+              PQerrorMessage(conn));
+  }
 #ifdef MRB_UTF8_STRING
   PQsetClientEncoding(conn, "UTF8");
 #endif
@@ -85,6 +84,124 @@ mrb_PQrequestCancel(mrb_state *mrb, mrb_value self)
   return mrb_symbol_value(MRB_SYM(cancel));
 }
 
+/* ===================================================================
+ * Async-aware additions (connection)
+ * =================================================================== */
+
+static mrb_value
+mrb_PQerrorMessage_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+  const char *msg = PQerrorMessage(conn);
+  return mrb_str_new_cstr(mrb, msg ? msg : "");
+}
+
+/* Class method: Pq.connect_start(conninfo = "") returns a Pq instance whose
+   PGconn is in CONNECTION_STARTED state. Drive it with #connect_poll until
+   that returns :ok or :failed. */
+static mrb_value
+mrb_PQconnectStart(mrb_state *mrb, mrb_value self)
+{
+  const char *conninfo = "";
+  mrb_get_args(mrb, "|z", &conninfo);
+
+  struct RClass *cls = mrb_class_ptr(self);
+  errno = 0;
+  PGconn *conn = PQconnectStart(conninfo);
+  if (unlikely(!conn)) {
+    /* libpq's malloc failed. We can't allocate a fresh exception either —
+       raise mruby's pre-allocated NoMemoryError. */
+    mrb_exc_raise(mrb, mrb_obj_value(mrb->nomem_err));
+  }
+  /* From here on the GC owns conn (the wrapper's dfree calls PQfinish). */
+  struct RData *data = mrb_data_object_alloc(mrb, cls, conn, &mrb_PGconn_type);
+  mrb_value obj = mrb_obj_value(data);
+
+  if (unlikely(PQstatus(conn) == CONNECTION_BAD)) {
+    mrb_raise(mrb, mrb_class_get_under_id(mrb, cls, MRB_SYM(ConnectionError)),
+              PQerrorMessage(conn));
+  }
+
+#ifdef MRB_UTF8_STRING
+  PQsetClientEncoding(conn, "UTF8");
+#endif
+
+  return obj;
+}
+
+static mrb_value
+mrb_PQconnectPoll(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  switch (PQconnectPoll(conn)) {
+    case PGRES_POLLING_READING: return mrb_symbol_value(MRB_SYM(reading));
+    case PGRES_POLLING_WRITING: return mrb_symbol_value(MRB_SYM(writing));
+    case PGRES_POLLING_OK:      return mrb_symbol_value(MRB_SYM(ok));
+    case PGRES_POLLING_FAILED:  return mrb_symbol_value(MRB_SYM(failed));
+    default:                    return mrb_symbol_value(MRB_SYM(active)); /* deprecated */
+  }
+}
+
+static mrb_value
+mrb_PQstatus_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  switch (PQstatus(conn)) {
+    case CONNECTION_OK:                return mrb_symbol_value(MRB_SYM(ok));
+    case CONNECTION_BAD:               return mrb_symbol_value(MRB_SYM(bad));
+    case CONNECTION_STARTED:           return mrb_symbol_value(MRB_SYM(started));
+    case CONNECTION_MADE:              return mrb_symbol_value(MRB_SYM(made));
+    case CONNECTION_AWAITING_RESPONSE: return mrb_symbol_value(MRB_SYM(awaiting_response));
+    case CONNECTION_AUTH_OK:           return mrb_symbol_value(MRB_SYM(auth_ok));
+    case CONNECTION_SETENV:            return mrb_symbol_value(MRB_SYM(setenv));
+    case CONNECTION_SSL_STARTUP:       return mrb_symbol_value(MRB_SYM(ssl_startup));
+    case CONNECTION_NEEDED:            return mrb_symbol_value(MRB_SYM(needed));
+    default:                           return mrb_int_value(mrb, (mrb_int) PQstatus(conn));
+  }
+}
+
+static mrb_value
+mrb_PQsetnonblocking(mrb_state *mrb, mrb_value self)
+{
+  mrb_bool arg;
+  mrb_get_args(mrb, "b", &arg);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  if (unlikely(PQsetnonblocking(conn, arg ? 1 : 0) < 0)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return mrb_bool_value(arg);
+}
+
+static mrb_value
+mrb_PQisnonblocking(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+  return mrb_bool_value(PQisnonblocking(conn));
+}
+
+/* ===================================================================
+ * end async-aware additions (connection)
+ * =================================================================== */
+
 static const char *
 mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength, int *paramFormat)
 {
@@ -119,9 +236,7 @@ mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
     } break;
 #endif
     default: {
-      mrb_gc_protect(mrb, value);
       value = mrb_str_to_str(mrb, value);
-      mrb_gc_protect(mrb, value);
       *paramType = 0;
       *paramLength = RSTRING_LEN(value);
       *paramFormat = 0;
@@ -134,7 +249,6 @@ static mrb_value
 mrb_pq_make_error_result(mrb_state *mrb, struct RClass *klass, PGresult *res)
 {
   mrb_value obj = mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_DATA, klass));
-  mrb_gc_protect(mrb, obj);
   mrb_iv_set(mrb, obj, MRB_IVSYM(mesg), mrb_str_new_cstr(mrb, PQresultErrorMessage(res)));
   mrb_iv_set(mrb, obj, MRB_IVSYM(status), mrb_int_value(mrb, PQresultStatus(res)));
   mrb_data_init(obj, res, &mrb_PGresult_type);
@@ -174,10 +288,10 @@ typedef struct {
 } mrb_pq_each_row_arg;
 
 static mrb_value
-mrb_pq_each_row_body(mrb_state *mrb, mrb_value arg_val)
+mrb_pq_each_row_body(mrb_state *mrb, void *arg_)
 {
-  mrb_pq_each_row_arg *arg = (mrb_pq_each_row_arg *) mrb_cptr(arg_val);
-  int arena_index = mrb_gc_arena_save(mrb);
+  mrb_pq_each_row_arg *arg = (mrb_pq_each_row_arg *) arg_;
+  mrb_int arena_index = mrb_gc_arena_save(mrb);
   PGresult *res;
 
   while ((res = PQgetResult(arg->conn))) {
@@ -211,7 +325,7 @@ mrb_pq_consume_each_row(mrb_state *mrb, mrb_value self, PGconn *conn, mrb_value 
   };
 
   mrb_bool exc = FALSE;
-  mrb_value result = mrb_protect(mrb, mrb_pq_each_row_body, mrb_cptr_value(mrb, &arg), &exc);
+  mrb_value result = mrb_protect_error(mrb, mrb_pq_each_row_body, &arg, &exc);
 
   if (exc) {
     PQrequestCancel(conn);
@@ -235,13 +349,9 @@ mrb_pq_encode_params(mrb_state *mrb, mrb_value *paramValues_val, mrb_int nParams
     mrb_raise(mrb, E_ARGUMENT_ERROR, "too many parameters");
   }
   mrb_value paramTypes_val = mrb_str_new_capa(mrb, nParams * sizeof(Oid));
-  mrb_gc_protect(mrb, paramTypes_val);
   mrb_value paramValue_val = mrb_str_new_capa(mrb, nParams * sizeof(char *));
-  mrb_gc_protect(mrb, paramValue_val);
   mrb_value paramLengths_val = mrb_str_new_capa(mrb, nParams * sizeof(int));
-  mrb_gc_protect(mrb, paramLengths_val);
   mrb_value paramFormats_val = mrb_str_new_capa(mrb, nParams * sizeof(int));
-  mrb_gc_protect(mrb, paramFormats_val);
 
   *paramTypes   = (Oid *)        RSTRING_PTR(paramTypes_val);
   *paramValues  = (const char **) RSTRING_PTR(paramValue_val);
@@ -272,7 +382,7 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
   const char **paramValues = NULL;
   int        *paramLengths = NULL;
   int        *paramFormats = NULL;
-  int arena_index = mrb_gc_arena_save(mrb);
+  mrb_int arena_index = mrb_gc_arena_save(mrb);
   mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
     &paramTypes, &paramValues, &paramLengths, &paramFormats);
 
@@ -295,7 +405,7 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
     if (likely(res)) {
       return mrb_pq_result_processor(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Result)), res);
     } else {
-      mrb_sys_fail(mrb, PQresultErrorMessage(res));
+      mrb_sys_fail(mrb, PQerrorMessage(conn));
     }
   }
 
@@ -317,7 +427,7 @@ mrb_PQprepare(mrb_state *mrb, mrb_value self)
   if (likely(res)) {
     return mrb_pq_result_processor(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Result)), res);
   } else {
-    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    mrb_sys_fail(mrb, PQerrorMessage(conn));
   }
 
   return self;
@@ -340,7 +450,7 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
   const char **paramValues = NULL;
   int        *paramLengths = NULL;
   int        *paramFormats = NULL;
-  int arena_index = mrb_gc_arena_save(mrb);
+  mrb_int arena_index = mrb_gc_arena_save(mrb);
   mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
     &paramTypes, &paramValues, &paramLengths, &paramFormats);
 
@@ -363,7 +473,7 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
     if (likely(res)) {
       return mrb_pq_result_processor(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Result)), res);
     } else {
-      mrb_sys_fail(mrb, PQresultErrorMessage(res));
+      mrb_sys_fail(mrb, PQerrorMessage(conn));
     }
   }
 
@@ -385,7 +495,7 @@ mrb_PQdescribePrepared(mrb_state *mrb, mrb_value self)
   if (likely(res)) {
     return mrb_pq_result_processor(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Result)), res);
   } else {
-    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    mrb_sys_fail(mrb, PQerrorMessage(conn));
   }
 
   return self;
@@ -406,18 +516,274 @@ mrb_PQdescribePortal(mrb_state *mrb, mrb_value self)
   if (likely(res)) {
     return mrb_pq_result_processor(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Result)), res);
   } else {
-    mrb_sys_fail(mrb, PQresultErrorMessage(res));
+    mrb_sys_fail(mrb, PQerrorMessage(conn));
   }
 
   return self;
 }
 
+/* ===================================================================
+ * Async-aware additions (query execution)
+ * ===================================================================
+ *
+ * Typical event-loop sequence:
+ *
+ *   conn.send_query(sql, *args)         # queue request into libpq's buffer
+ *   while (r = conn.flush) != 0         # push it onto the socket
+ *     loop.wait_writable(conn.socket)
+ *   end
+ *   loop do
+ *     while conn.busy?                  # absorb data when the socket is ready
+ *       loop.wait_readable(conn.socket)
+ *       conn.consume_input
+ *     end
+ *     res = conn.get_result             # never blocks once !busy?
+ *     break if res.nil?                 # nil signals "no more results"
+ *     # ...handle res...
+ *   end
+ *
+ * Call #set_single_row_mode between send_query and the first get_result to
+ * receive one Pq::Result per row.
+ */
+
+static mrb_value
+mrb_PQsendQuery_m(mrb_state *mrb, mrb_value self)
+{
+  const char *command;
+  mrb_value *paramValues_val = NULL;
+  mrb_int nParams = 0;
+  mrb_get_args(mrb, "z|*", &command, &paramValues_val, &nParams);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  Oid        *paramTypes   = NULL;
+  const char **paramValues = NULL;
+  int        *paramLengths = NULL;
+  int        *paramFormats = NULL;
+  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
+    &paramTypes, &paramValues, &paramLengths, &paramFormats);
+
+  errno = 0;
+  int success = has_params
+    ? PQsendQueryParams(conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, 0)
+    : PQsendQuery(conn, command);
+  mrb_gc_arena_restore(mrb, arena_index);
+
+  if (unlikely(!success)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return self;
+}
+
+static mrb_value
+mrb_PQsendPrepare(mrb_state *mrb, mrb_value self)
+{
+  const char *stmtName, *query;
+  mrb_get_args(mrb, "zz", &stmtName, &query);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  if (unlikely(!PQsendPrepare(conn, stmtName, query, 0, NULL))) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return self;
+}
+
+static mrb_value
+mrb_PQsendQueryPrepared_m(mrb_state *mrb, mrb_value self)
+{
+  const char *stmtName;
+  mrb_value *paramValues_val = NULL;
+  mrb_int nParams = 0;
+  mrb_get_args(mrb, "z|*", &stmtName, &paramValues_val, &nParams);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  Oid        *paramTypes   = NULL;
+  const char **paramValues = NULL;
+  int        *paramLengths = NULL;
+  int        *paramFormats = NULL;
+  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
+    &paramTypes, &paramValues, &paramLengths, &paramFormats);
+
+  errno = 0;
+  int success = has_params
+    ? PQsendQueryPrepared(conn, stmtName, nParams, paramValues, paramLengths, paramFormats, 0)
+    : PQsendQueryPrepared(conn, stmtName, 0, NULL, NULL, NULL, 0);
+  mrb_gc_arena_restore(mrb, arena_index);
+
+  if (unlikely(!success)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return self;
+}
+
+static mrb_value
+mrb_PQsendDescribePrepared(mrb_state *mrb, mrb_value self)
+{
+  const char *stmtName = NULL;
+  mrb_get_args(mrb, "|z!", &stmtName);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  if (unlikely(!PQsendDescribePrepared(conn, stmtName))) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return self;
+}
+
+static mrb_value
+mrb_PQsendDescribePortal(mrb_state *mrb, mrb_value self)
+{
+  const char *portalName = NULL;
+  mrb_get_args(mrb, "|z!", &portalName);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  if (unlikely(!PQsendDescribePortal(conn, portalName))) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return self;
+}
+
+static mrb_value
+mrb_PQflush_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  int r = PQflush(conn);
+  if (unlikely(r == -1)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  /* 0 = fully flushed, 1 = data still pending (wait for writable) */
+  return mrb_int_value(mrb, r);
+}
+
+static mrb_value
+mrb_PQconsumeInput_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  if (unlikely(!PQconsumeInput(conn))) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  return self;
+}
+
+static mrb_value
+mrb_PQisBusy_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+  return mrb_bool_value(PQisBusy(conn));
+}
+
+static mrb_value
+mrb_PQgetResult_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  PGresult *res = PQgetResult(conn);
+  if (!res) return mrb_nil_value();
+
+  return mrb_pq_result_processor(mrb,
+    mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Result)), res);
+}
+
+static mrb_value
+mrb_PQsetSingleRowMode_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+  return mrb_bool_value(PQsetSingleRowMode(conn));
+}
+
+typedef struct {
+  PGnotify *n;
+  mrb_value self;
+} mrb_pq_notify_arg;
+
+static mrb_value
+mrb_pq_notifies_build(mrb_state *mrb, void *arg_)
+{
+  mrb_pq_notify_arg *arg = (mrb_pq_notify_arg *) arg_;
+  struct RClass *notify_class = mrb_class_get_under_id(mrb,
+    mrb_obj_class(mrb, arg->self), MRB_SYM(Notify));
+  mrb_value args[3];
+  args[0] = mrb_str_new_cstr(mrb, arg->n->relname);
+  args[1] = mrb_int_value(mrb, arg->n->be_pid);
+  args[2] = mrb_str_new_cstr(mrb, arg->n->extra ? arg->n->extra : "");
+  return mrb_obj_new(mrb, notify_class, 3, args);
+}
+
+static mrb_value
+mrb_PQnotifies_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  PGnotify *n = PQnotifies(conn);
+  if (!n) return mrb_nil_value();
+
+  /* Anything raised between here and PQfreemem(n) would leak the libpq
+     buffer. Wrap the build path in mrb_protect_error so cleanup is
+     guaranteed even if a string allocation or the class lookup throws. */
+  mrb_pq_notify_arg arg = { .n = n, .self = self };
+  mrb_bool err = FALSE;
+  mrb_value result = mrb_protect_error(mrb, mrb_pq_notifies_build, &arg, &err);
+  PQfreemem(n);
+  if (err) mrb_exc_raise(mrb, result);
+  return result;
+}
+
+/* ===================================================================
+ * end async-aware additions (query execution)
+ * =================================================================== */
+
 static void
 mrb_PQnoticeReceiver(void *arg_, const PGresult *res)
 {
   mrb_PQnoticeReceiver_arg *arg = (mrb_PQnoticeReceiver_arg *) arg_;
-  int arena_index = mrb_gc_arena_save(arg->mrb);
-  mrb_yield(arg->mrb, arg->block, mrb_pq_result_processor(arg->mrb, arg->pq_result_class, res));
+  /* libpq frees `res` as soon as this callback returns, but Pq::Result's
+     dfree is PQclear — wrapping `res` directly would set up a use-after-
+     free at the next GC. Copy so the GC and libpq don't both try to free
+     the same buffer. */
+  PGresult *copy = PQcopyResult(res, 0);
+  if (!copy) return;  /* OOM — drop the notice; libpq frees `res` for us */
+  mrb_int arena_index = mrb_gc_arena_save(arg->mrb);
+  mrb_yield(arg->mrb, arg->block, mrb_pq_result_processor(arg->mrb, arg->pq_result_class, copy));
   mrb_gc_arena_restore(arg->mrb, arena_index);
 }
 
@@ -659,7 +1025,7 @@ mrb_PQresultErrorField(mrb_state *mrb, mrb_value self)
 void
 mrb_mruby_postgresql_gem_init(mrb_state *mrb)
 {
-  struct RClass *pq_class, *pq_error_class, *pq_result_mixins, *pq_result_class, *pq_result_error_class, *pq_notice_processor_class;
+  struct RClass *pq_class, *pq_error_class, *pq_result_mixins, *pq_result_class, *pq_result_error_class, *pq_notice_processor_class, *pq_notify_class;
   pq_class = mrb_define_class_id(mrb, MRB_SYM(Pq), mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
   pq_error_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Error), E_RUNTIME_ERROR);
@@ -679,6 +1045,31 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method_id(mrb, pq_class, MRB_SYM(notice_receiver), mrb_PQsetNoticeReceiver, MRB_ARGS_BLOCK());
   pq_notice_processor_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(NoticeReceiver), mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_notice_processor_class, MRB_TT_DATA);
+
+  /* ===== async-aware additions ===== */
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(error_message), mrb_PQerrorMessage_m, MRB_ARGS_NONE());
+  mrb_define_class_method_id(mrb, pq_class, MRB_SYM(connect_start), mrb_PQconnectStart, MRB_ARGS_OPT(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(connect_poll), mrb_PQconnectPoll, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(status), mrb_PQstatus_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM_E(nonblocking), mrb_PQsetnonblocking, MRB_ARGS_REQ(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM_Q(nonblocking), mrb_PQisnonblocking, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(send_query), mrb_PQsendQuery_m, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(send_prepare), mrb_PQsendPrepare, MRB_ARGS_REQ(2));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(send_query_prepared), mrb_PQsendQueryPrepared_m, MRB_ARGS_REQ(1)|MRB_ARGS_REST());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(send_describe_prepared), mrb_PQsendDescribePrepared, MRB_ARGS_OPT(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(send_describe_portal), mrb_PQsendDescribePortal, MRB_ARGS_OPT(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(flush), mrb_PQflush_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(consume_input), mrb_PQconsumeInput_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM_Q(busy), mrb_PQisBusy_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(get_result), mrb_PQgetResult_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(set_single_row_mode), mrb_PQsetSingleRowMode_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(notifies), mrb_PQnotifies_m, MRB_ARGS_NONE());
+  /* Pq::Notify is fleshed out in mrblib/pq.rb; defined here so that
+     mrb_class_get_under_id always finds it. */
+  pq_notify_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Notify), mrb->object_class);
+  (void) pq_notify_class;
+  /* ===== end async-aware additions ===== */
+
   pq_result_mixins = mrb_define_module_under_id(mrb, pq_class, MRB_SYM(ResultMixins));
   mrb_define_const_id(mrb, pq_result_mixins, MRB_SYM(EMPTY_QUERY), mrb_int_value(mrb, PGRES_EMPTY_QUERY));
   mrb_define_const_id(mrb, pq_result_mixins, MRB_SYM(COMMAND_OK), mrb_int_value(mrb, PGRES_COMMAND_OK));

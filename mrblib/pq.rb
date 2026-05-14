@@ -22,6 +22,15 @@ class Pq
     end
   end # class Stmt
 
+  class Notify
+    attr_reader :relname, :be_pid, :extra
+    def initialize(relname, be_pid, extra)
+      @relname = relname
+      @be_pid  = be_pid
+      @extra   = extra
+    end
+  end
+
   class Result
     constants.each do |const|
       define_method("#{const.downcase}?") do
