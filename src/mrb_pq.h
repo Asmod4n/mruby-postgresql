@@ -7,7 +7,6 @@
 #include <mruby/class.h>
 #include <mruby/error.h>
 #include <mruby/variable.h>
-#include <mruby/throw.h>
 #include <mruby/dump.h>
 #include <mruby/numeric.h>
 #include <string.h>
