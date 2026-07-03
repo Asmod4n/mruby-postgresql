@@ -255,6 +255,53 @@ end
 
 `n` is a `Pq::Notify` with `relname`, `be_pid`, and `extra` accessors.
 
+### COPY (manual, row-by-row)
+
+The gem deliberately ships no bulk COPY helpers — mruby caps strings at 1MB
+on some platforms, and file-based bulk loading is already served by `psql`.
+What it wraps is the minimal per-row API, so a `COPY` issued manually
+through `exec` can be driven (or aborted) instead of wedging the connection.
+No call ever handles more than one row at a time, so the string cap is
+never in play.
+
+Sending data (`COPY ... FROM STDIN`):
+```ruby
+res = conn.exec("COPY mytable FROM STDIN")
+raise "unexpected #{res.status}" unless res.copy_in?
+conn.put_copy_data("1\tfoo\n")
+conn.put_copy_data("2\tbar\n")
+conn.put_copy_end
+while (res = conn.get_result); end   # drain the final COMMAND_OK / error
+```
+
+Receiving data (`COPY ... TO STDOUT`):
+```ruby
+res = conn.exec("COPY mytable TO STDOUT")
+raise "unexpected #{res.status}" unless res.copy_out?
+while (row = conn.get_copy_data)
+  print row                          # one data row per call
+end
+while (res = conn.get_result); end
+```
+
+`get_copy_data` takes no arguments — whether it blocks follows the
+connection's own nonblocking state. It returns one row per call, `nil` once
+the COPY is finished (then drain `get_result`), or `:would_block` when the
+connection is in nonblocking mode and no complete row has arrived yet (wait
+readable, `consume_input`, retry).
+
+`put_copy_data` and `put_copy_end` return `true` when the data was queued
+and `false` when the send would block in nonblocking mode (wait writable,
+`flush`, retry).
+
+`put_copy_end("some message")` force-fails the COPY server-side. This is
+also the escape hatch when SQL fed through `exec` unexpectedly starts a
+COPY: abort it, drain `get_result`, and the connection stays usable — no
+`reset` needed.
+
+Don't use the block form of `exec` for COPY statements — it drives
+single-row mode and cannot service the copy protocol.
+
 ### Method reference
 
 | Method                                | Wraps                       |
@@ -276,6 +323,9 @@ end
 | `conn.get_result`                     | `PQgetResult`               |
 | `conn.set_single_row_mode`            | `PQsetSingleRowMode`        |
 | `conn.notifies`                       | `PQnotifies`                |
+| `conn.put_copy_data(data)`            | `PQputCopyData`             |
+| `conn.put_copy_end(message = nil)`    | `PQputCopyEnd`              |
+| `conn.get_copy_data`                  | `PQgetCopyData`             |
 
 `connect_poll` returns `:reading`, `:writing`, `:ok`, or `:failed`. (libpq
 also defines a deprecated `:active` state; the gem exposes it for
