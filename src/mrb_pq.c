@@ -768,6 +768,90 @@ mrb_PQnotifies_m(mrb_state *mrb, mrb_value self)
   return result;
 }
 
+static mrb_value
+mrb_PQputCopyData_m(mrb_state *mrb, mrb_value self)
+{
+  char *data;
+  mrb_int len;
+  mrb_get_args(mrb, "s", &data, &len);
+  mrb_assert_int_fit(mrb_int, len, int, INT_MAX);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  int r = PQputCopyData(conn, data, (int) len);
+  if (unlikely(r == -1)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  /* true = queued, false = would block (nonblocking mode; retry after flush) */
+  return mrb_bool_value(r == 1);
+}
+
+static mrb_value
+mrb_PQputCopyEnd_m(mrb_state *mrb, mrb_value self)
+{
+  const char *errormsg = NULL;
+  mrb_get_args(mrb, "|z!", &errormsg);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  int r = PQputCopyEnd(conn, errormsg);
+  if (unlikely(r == -1)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+  /* true = sent, false = would block (nonblocking mode; retry after flush) */
+  return mrb_bool_value(r == 1);
+}
+
+typedef struct {
+  char *buffer;
+  int len;
+} mrb_pq_copy_row_arg;
+
+static mrb_value
+mrb_pq_copy_row_build(mrb_state *mrb, void *arg_)
+{
+  mrb_pq_copy_row_arg *arg = (mrb_pq_copy_row_arg *) arg_;
+  return mrb_str_new(mrb, arg->buffer, arg->len);
+}
+
+static mrb_value
+mrb_PQgetCopyData_m(mrb_state *mrb, mrb_value self)
+{
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  char *buffer = NULL;
+  errno = 0;
+  int r = PQgetCopyData(conn, &buffer, PQisnonblocking(conn));
+  switch (r) {
+    case 0: /* nonblocking mode: no complete row available yet */
+      return mrb_symbol_value(MRB_SYM(would_block));
+    case -1: /* COPY finished; drain get_result for the final status */
+      return mrb_nil_value();
+    case -2:
+      mrb_pq_handle_connection_error(mrb, self, conn);
+      return mrb_nil_value(); /* not reached */
+    default: {
+      /* Anything raised before PQfreemem(buffer) would leak the libpq
+         buffer, so build the row string under mrb_protect_error. */
+      mrb_pq_copy_row_arg arg = { .buffer = buffer, .len = r };
+      mrb_bool err = FALSE;
+      mrb_value row = mrb_protect_error(mrb, mrb_pq_copy_row_build, &arg, &err);
+      PQfreemem(buffer);
+      if (err) mrb_exc_raise(mrb, row);
+      return row;
+    }
+  }
+}
+
 /* ===================================================================
  * end async-aware additions (query execution)
  * =================================================================== */
@@ -1093,6 +1177,9 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method_id(mrb, pq_class, MRB_SYM(get_result), mrb_PQgetResult_m, MRB_ARGS_NONE());
   mrb_define_method_id(mrb, pq_class, MRB_SYM(set_single_row_mode), mrb_PQsetSingleRowMode_m, MRB_ARGS_NONE());
   mrb_define_method_id(mrb, pq_class, MRB_SYM(notifies), mrb_PQnotifies_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(put_copy_data), mrb_PQputCopyData_m, MRB_ARGS_REQ(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(put_copy_end), mrb_PQputCopyEnd_m, MRB_ARGS_OPT(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(get_copy_data), mrb_PQgetCopyData_m, MRB_ARGS_NONE());
   /* Pq::Notify is fleshed out in mrblib/pq.rb; defined here so that
      mrb_class_get_under_id always finds it. */
   pq_notify_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Notify), mrb->object_class);

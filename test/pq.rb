@@ -329,3 +329,53 @@ assert("Async: error_message returns a String") do
   assert_kind_of String, conn.error_message
   conn.close
 end
+
+# ===========================================================================
+# COPY (manual, row-by-row)
+# ===========================================================================
+
+assert("COPY: round-trip via put_copy_data / get_copy_data") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  conn.exec("create temp table copy_test (id int4, word text)")
+
+  res = conn.exec("COPY copy_test FROM STDIN")
+  assert_true res.copy_in?
+  assert_true conn.put_copy_data("1\tfoo\n")
+  assert_true conn.put_copy_data("2\tbar\n")
+  assert_true conn.put_copy_end
+  final = conn.get_result
+  assert_true final.command_ok?
+  assert_nil conn.get_result
+
+  res = conn.exec("COPY copy_test TO STDOUT")
+  assert_true res.copy_out?
+  rows = []
+  while (row = conn.get_copy_data)
+    rows << row
+  end
+  assert_equal ["1\tfoo\n", "2\tbar\n"], rows
+  final = conn.get_result
+  assert_true final.command_ok?
+  assert_nil conn.get_result
+
+  # the connection stays usable after a completed COPY
+  assert_equal [[2]], conn.exec("select count(*)::int4 from copy_test").to_ary
+  conn.close
+end
+
+assert("COPY: put_copy_end with message aborts, connection recovers") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  conn.exec("create temp table copy_abort_test (id int4)")
+
+  res = conn.exec("COPY copy_abort_test FROM STDIN")
+  assert_true res.copy_in?
+  assert_true conn.put_copy_data("1\n")
+  assert_true conn.put_copy_end("aborted by test")
+  final = conn.get_result
+  assert_true final.is_a?(Pq::Result::FatalError)
+  assert_nil conn.get_result
+
+  # the abort discarded the pending row and the connection stays usable
+  assert_equal [[0]], conn.exec("select count(*)::int4 from copy_abort_test").to_ary
+  conn.close
+end
