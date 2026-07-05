@@ -379,3 +379,60 @@ assert("COPY: put_copy_end with message aborts, connection recovers") do
   assert_equal [[0]], conn.exec("select count(*)::int4 from copy_abort_test").to_ary
   conn.close
 end
+
+# ===========================================================================
+# Primitives for tooling (migration gems etc.)
+# ===========================================================================
+
+assert("transaction_status follows BEGIN/error/ROLLBACK") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal :idle, conn.transaction_status
+  conn.exec("BEGIN")
+  assert_equal :intrans, conn.transaction_status
+  conn.exec("this is not sql")           # error result -> aborted transaction
+  assert_equal :inerror, conn.transaction_status
+  conn.exec("ROLLBACK")
+  assert_equal :idle, conn.transaction_status
+  conn.close
+  assert_raise(IOError) { conn.transaction_status }
+end
+
+assert("escape_identifier quotes and doubles embedded quotes") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal "\"users\"", conn.escape_identifier("users")
+  assert_equal "\"weird \"\"name\"\"\"", conn.escape_identifier("weird \"name\"")
+  # usable in real SQL
+  res = conn.exec("SELECT 1::int4 AS #{conn.escape_identifier("weird \"col\"")}")
+  assert_equal "weird \"col\"", res.fname(0)
+  conn.close
+end
+
+assert("escape_literal quotes string values") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal "'it''s'", conn.escape_literal("it's")
+  res = conn.exec("SELECT #{conn.escape_literal("it's")}::text")
+  assert_equal [["it's"]], res.to_ary
+  conn.close
+end
+
+assert("cmd_status and cmd_tuples report command outcomes") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  conn.exec("CREATE TEMP TABLE prim_t (id int4)")
+  res = conn.exec("INSERT INTO prim_t VALUES (1), (2)")
+  assert_equal "INSERT 0 2", res.cmd_status
+  assert_equal 2, res.cmd_tuples
+  assert_equal 2, conn.exec("UPDATE prim_t SET id = id + 1").cmd_tuples
+  assert_equal 1, conn.exec("DELETE FROM prim_t WHERE id = 2").cmd_tuples
+  res = conn.exec("CREATE TEMP TABLE prim_t2 (id int4)")
+  assert_equal "CREATE TABLE", res.cmd_status
+  assert_nil res.cmd_tuples               # no row count for DDL
+  conn.close
+end
+
+assert("Result#error_message returns the full server message") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  res = conn.exec("this is not sql")
+  assert_include res.error_message, "syntax error"
+  assert_equal "", conn.exec("SELECT 1").error_message
+  conn.close
+end
