@@ -63,6 +63,75 @@ puts res.to_ary
 ```
 
 
+Type mapping
+------------
+Parameters (Ruby -> PostgreSQL):
+
+| Ruby value            | Sent as                                            |
+|-----------------------|----------------------------------------------------|
+| `nil`, `:NULL`        | SQL `NULL`                                         |
+| `true` / `false`      | `bool`                                             |
+| `Integer`             | `int2`/`int4`/`int8` (binary, smallest that fits)  |
+| `Float`               | `float4`/`float8` (binary)                         |
+| `String`              | untyped text (PostgreSQL infers from context)      |
+| `Symbol`              | its name as untyped text                           |
+| `Time`                | `timestamptz` (UTC, microsecond precision)         |
+| `Rational`            | decimal text (untyped): exact when finite,         |
+|                       | else the same 20 fractional digits PostgreSQL's    |
+|                       | own numeric division produces                      |
+| `Array`               | array literal; element type from the first typed   |
+|                       | leaf (`int8[]`, `float8[]`, `text[]`, `bool[]`,    |
+|                       | `timestamptz[]`); nested arrays are multidim; an   |
+|                       | all-`nil`/empty array is untyped — add a cast      |
+| anything else         | `to_str` as untyped text (serialize a Hash        |
+|                       | yourself if you mean to send JSON)                 |
+
+Results (PostgreSQL -> Ruby), text format:
+
+| PostgreSQL type                     | Decoded to                           |
+|-------------------------------------|--------------------------------------|
+| `bool`                              | `true` / `false`                     |
+| `int2`, `int4`, `int8`, `oid`       | `Integer`                            |
+| `float4`, `float8`                  | `Float`                              |
+| `numeric`                           | exact: `Integer` when integral       |
+|                                     | (arbitrary size via mruby-bigint),   |
+|                                     | `Rational` when fractional (via      |
+|                                     | mruby-rational, both are gem deps);  |
+|                                     | `NaN`/`±Infinity` -> `Float`; cast   |
+|                                     | `::float8` for an approximate Float  |
+| `date`                              | `Time` at UTC midnight               |
+| `timestamp`                         | `Time` (interpreted as UTC)          |
+| `timestamptz`                       | `Time` (offset applied, in UTC)      |
+| `bytea`                             | binary `String`                      |
+| `json`, `jsonb`                     | via `JSON.parse` when available      |
+| `xml`                               | via `XML.parse` when available       |
+| `void`                              | `nil`                                |
+| SQL `NULL`                          | `:NULL`                              |
+| everything else (`uuid`, `inet`,    | `String` — PostgreSQL's canonical    |
+| `interval`, `time`, arrays, enums,  | text form (`unnest` / `to_jsonb`     |
+| `money`, ranges, composites, ...)   | in SQL when you want structure)      |
+
+When you want structure out of the canonical-text types, ask PostgreSQL —
+its own output functions convert anything into types this gem decodes:
+
+```sql
+select to_jsonb(u) from users u         -- whole row -> Ruby Hash
+select jsonb_agg(p.title) ...           -- aggregate straight into jsonb
+select hstore_to_jsonb(attrs) ...       -- hstore -> Ruby Hash
+select to_jsonb(compo) ...              -- composite/range/enum -> JSON
+select unnest(tags) ...                 -- or any array -> plain rows
+```
+
+(Note that JSON flattens type fidelity: timestamps arrive as ISO-8601
+strings and exact numerics as JSON numbers — keep values you need typed
+as their own columns.)
+
+Decoding never raises: anything that fails to parse (e.g. `'infinity'` /
+BC timestamps, which `Time` cannot represent) comes back as the raw text.
+`Time` decoding requires mruby-time (part of the default gembox); without
+it the date/timestamp types also fall back to text.
+
+
 Retrieving results row-by-row
 -----------------------------
 ```ruby

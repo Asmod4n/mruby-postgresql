@@ -20,6 +20,25 @@
 #define E_IO_ERROR (mrb_exc_get(mrb, "IOError"))
 #endif
 
+#include <time.h>
+
+#ifdef _WIN32
+#ifdef _MSC_VER
+/* Win32 platform do not provide gmtime_r; emulate it using gmtime_s */
+#define gmtime_r(tp, tm)    ((gmtime_s((tm), (tp)) == 0) ? (tm) : NULL)
+#else
+#define NO_GMTIME_R
+#endif
+#endif
+#ifdef __STRICT_ANSI__
+/* Strict ANSI (e.g. -std=c99) do not provide gmtime_r */
+#define NO_GMTIME_R
+#endif
+
+#ifdef NO_GMTIME_R
+#define gmtime_r(t,r) gmtime(t)
+#endif
+
 #if (__GNUC__ >= 3) || (__INTEL_COMPILER >= 800) || defined(__clang__)
 # define likely(x) __builtin_expect(!!(x), 1)
 # define unlikely(x) __builtin_expect(!!(x), 0)

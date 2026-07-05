@@ -21,6 +21,10 @@ mrb_PQconnectdb(mrb_state *mrb, mrb_value self)
 #ifdef MRB_UTF8_STRING
   PQsetClientEncoding(conn, "UTF8");
 #endif
+  /* normalize the session like the client encoding above: with the zone
+     pinned, timestamptz text always carries +00 and datetime decoding is
+     a single Time.gm (see Pq.decode_datetime) */
+  PQclear(PQexec(conn, "SET timezone TO 'UTC'"));
 
   return self;
 }
@@ -47,6 +51,11 @@ mrb_PQreset(mrb_state *mrb, mrb_value self)
   if (unlikely(PQstatus(conn) != CONNECTION_OK)) {
     mrb_pq_handle_connection_error(mrb, self, conn);
   }
+#ifdef MRB_UTF8_STRING
+  PQsetClientEncoding(conn, "UTF8");
+#endif
+  /* a reset session starts fresh: re-pin the zone (see initialize) */
+  PQclear(PQexec(conn, "SET timezone TO 'UTC'"));
 
   return self;
 }
@@ -128,6 +137,10 @@ mrb_PQconnectStart(mrb_state *mrb, mrb_value self)
 #ifdef MRB_UTF8_STRING
   PQsetClientEncoding(conn, "UTF8");
 #endif
+  /* normalize the session like the client encoding above: with the zone
+     pinned, timestamptz text always carries +00 and datetime decoding is
+     a single Time.gm (see Pq.decode_datetime) */
+  PQclear(PQexec(conn, "SET timezone TO 'UTC'"));
 
   return obj;
 }
@@ -202,6 +215,172 @@ mrb_PQisnonblocking(mrb_state *mrb, mrb_value self)
  * end async-aware additions (connection)
  * =================================================================== */
 
+/* =====================================================================
+ * Typed parameter encoding helpers
+ * ===================================================================== */
+
+static mrb_bool
+mrb_pq_time_p(mrb_state *mrb, mrb_value v)
+{
+  return mrb_obj_is_kind_of(mrb, v, mrb_class_get_id(mrb, MRB_SYM(Time)));
+}
+
+/* Time -> "YYYY-MM-DD HH:MM:SS.ffffff+00": fixed-length buffer, digit
+   arithmetic — the mruby-time-httpdate way. The epoch (to_i) is
+   zone-independent, so the Time's utc/local display flag is irrelevant;
+   gmtime_r renders it as the UTC instant it is. */
+static mrb_value
+mrb_pq_time_text(mrb_state *mrb, mrb_value t)
+{
+  time_t timer = (time_t)mrb_integer(mrb_type_convert(mrb, t, MRB_TT_INTEGER, MRB_SYM(to_i)));
+  mrb_int usec = mrb_integer(mrb_type_convert(mrb, mrb_funcall_id(mrb, t, MRB_SYM(usec), 0), MRB_TT_INTEGER, MRB_SYM(to_i)));
+  struct tm tp;
+  struct tm *tm = gmtime_r(&timer, &tp);
+  if (unlikely(!tm)) {
+    mrb_sys_fail(mrb, "gmtime_r");
+  }
+  int year = tm->tm_year + 1900;
+  if (unlikely(year < 0 || year > 9999)) {
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "Time out of range for timestamptz encoding");
+  }
+
+  mrb_value str = mrb_str_new(mrb, NULL, 29);
+  char *ptr = RSTRING_PTR(str);
+
+  *ptr++ = '0' + (year / 1000);
+  *ptr++ = '0' + (year / 100 % 10);
+  *ptr++ = '0' + (year / 10 % 10);
+  *ptr++ = '0' + (year % 10);
+  *ptr++ = '-';
+  *ptr++ = '0' + ((tm->tm_mon + 1) / 10);
+  *ptr++ = '0' + ((tm->tm_mon + 1) % 10);
+  *ptr++ = '-';
+  *ptr++ = '0' + (tm->tm_mday / 10);
+  *ptr++ = '0' + (tm->tm_mday % 10);
+  *ptr++ = ' ';
+  *ptr++ = '0' + (tm->tm_hour / 10);
+  *ptr++ = '0' + (tm->tm_hour % 10);
+  *ptr++ = ':';
+  *ptr++ = '0' + (tm->tm_min / 10);
+  *ptr++ = '0' + (tm->tm_min % 10);
+  *ptr++ = ':';
+  *ptr++ = '0' + (tm->tm_sec / 10);
+  *ptr++ = '0' + (tm->tm_sec % 10);
+  *ptr++ = '.';
+  for (mrb_int i = 100000; i > 0; i /= 10) {
+    *ptr++ = '0' + (char)(usec / i % 10);
+  }
+  *ptr++ = '+';
+  *ptr++ = '0';
+  *ptr++ = '0';
+
+  return str;
+}
+
+static void mrb_pq_array_literal(mrb_state *mrb, mrb_value ary, mrb_value out);
+
+static void
+mrb_pq_array_cat_quoted(mrb_state *mrb, mrb_value out, mrb_value str)
+{
+  /* str is kept referenced by our caller for the duration, and mruby
+     string buffers don't move, so the pointer stays valid across cat */
+  const char *s = RSTRING_PTR(str);
+  mrb_int n = RSTRING_LEN(str);
+  mrb_str_cat_lit(mrb, out, "\"");
+  for (mrb_int i = 0; i < n; i++) {
+    if (s[i] == '"' || s[i] == '\\') mrb_str_cat_lit(mrb, out, "\\");
+    mrb_str_cat(mrb, out, s + i, 1);
+  }
+  mrb_str_cat_lit(mrb, out, "\"");
+}
+
+static void
+mrb_pq_array_literal_elem(mrb_state *mrb, mrb_value v, mrb_value out)
+{
+  switch (mrb_type(v)) {
+    case MRB_TT_FALSE: {
+      if (!mrb_integer(v)) { mrb_str_cat_lit(mrb, out, "NULL"); }
+      else                 { mrb_str_cat_lit(mrb, out, "\"f\""); }
+    } break;
+    case MRB_TT_TRUE: {
+      mrb_str_cat_lit(mrb, out, "\"t\"");
+    } break;
+    case MRB_TT_INTEGER:
+#ifndef MRB_WITHOUT_FLOAT
+    case MRB_TT_FLOAT:
+#endif
+    {
+      mrb_str_cat_str(mrb, out, mrb_obj_as_string(mrb, v));
+    } break;
+    case MRB_TT_ARRAY: {
+      mrb_pq_array_literal(mrb, v, out);
+    } break;
+    case MRB_TT_SYMBOL: {
+      if (mrb_symbol(v) == MRB_SYM(NULL)) {
+        mrb_str_cat_lit(mrb, out, "NULL");
+      } else {
+        mrb_int n;
+        const char *s = mrb_sym_name_len(mrb, mrb_symbol(v), &n);
+        mrb_pq_array_cat_quoted(mrb, out, mrb_str_new(mrb, s, n));
+      }
+    } break;
+    default: {
+      mrb_value s = mrb_pq_time_p(mrb, v) ? mrb_pq_time_text(mrb, v) : mrb_str_to_str(mrb, v);
+      mrb_pq_array_cat_quoted(mrb, out, s);
+    } break;
+  }
+}
+
+/* Ruby Array -> PostgreSQL array literal text; nested arrays become
+   multidimensional (PostgreSQL enforces rectangularity server-side) */
+static void
+mrb_pq_array_literal(mrb_state *mrb, mrb_value ary, mrb_value out)
+{
+  mrb_int len = RARRAY_LEN(ary);
+  mrb_str_cat_lit(mrb, out, "{");
+  for (mrb_int i = 0; i < len; i++) {
+    if (i) mrb_str_cat_lit(mrb, out, ",");
+    mrb_pq_array_literal_elem(mrb, mrb_ary_ref(mrb, ary, i), out);
+  }
+  mrb_str_cat_lit(mrb, out, "}");
+}
+
+/* array parameter type from the first typed leaf: Integer -> _int8,
+   Float -> _float8, String/Symbol -> _text, bool -> _bool,
+   Time -> _timestamptz. InvalidOid (untyped) when the array holds only
+   NULLs or nothing — PostgreSQL then infers from the query context. */
+static Oid
+mrb_pq_array_param_oid(mrb_state *mrb, mrb_value ary)
+{
+  mrb_int len = RARRAY_LEN(ary);
+  for (mrb_int i = 0; i < len; i++) {
+    mrb_value v = mrb_ary_ref(mrb, ary, i);
+    switch (mrb_type(v)) {
+      case MRB_TT_ARRAY: {
+        Oid sub = mrb_pq_array_param_oid(mrb, v);
+        if (sub != InvalidOid) return sub;
+      } break;
+      case MRB_TT_FALSE: {
+        if (!mrb_integer(v)) break; /* nil */
+        return 1000;
+      }
+      case MRB_TT_TRUE:    return 1000;
+      case MRB_TT_INTEGER: return 1016;
+#ifndef MRB_WITHOUT_FLOAT
+      case MRB_TT_FLOAT:   return 1022;
+#endif
+      case MRB_TT_STRING:  return 1009;
+      case MRB_TT_SYMBOL: {
+        if (mrb_symbol(v) == MRB_SYM(NULL)) break;
+        return 1009;
+      }
+      default:
+        return mrb_pq_time_p(mrb, v) ? 1185 : 1009;
+    }
+  }
+  return InvalidOid;
+}
+
 static const char *
 mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramLength, int *paramFormat)
 {
@@ -235,8 +414,62 @@ mrb_pq_encode_value(mrb_state *mrb, mrb_value value, Oid *paramType, int *paramL
       return mrb_pq_encode_float(mrb, value, paramType, paramLength);
     } break;
 #endif
+    case MRB_TT_SYMBOL: {
+      /* :NULL round-trips back to SQL NULL (getvalue decodes NULL as
+         :NULL); any other Symbol is sent as its name, untyped text */
+      if (mrb_symbol(value) == MRB_SYM(NULL)) {
+        *paramType = 0;
+        *paramLength = 0;
+        *paramFormat = 0;
+        return NULL;
+      }
+      mrb_int n;
+      const char *s = mrb_sym_name_len(mrb, mrb_symbol(value), &n);
+      mrb_value str = mrb_str_new(mrb, s, n);
+      mrb_gc_protect(mrb, str);
+      *paramType = 0;
+      *paramLength = RSTRING_LEN(str);
+      *paramFormat = 0;
+      return RSTRING_PTR(str);
+    } break;
+    case MRB_TT_ARRAY: {
+      mrb_value out = mrb_str_new(mrb, NULL, 0);
+      mrb_gc_protect(mrb, out);
+      mrb_pq_array_literal(mrb, value, out);
+      *paramType = mrb_pq_array_param_oid(mrb, value);
+      *paramLength = RSTRING_LEN(out);
+      *paramFormat = 0;
+      return RSTRING_PTR(out);
+    } break;
+#ifdef MRB_USE_RATIONAL
+    case MRB_TT_RATIONAL: {
+      /* exact decimal text (Pq.encode_rational), untyped so PostgreSQL
+         infers numeric/float8 from context — the inverse of numeric
+         decoding; non-terminating rationals raise there */
+      mrb_value str = mrb_str_to_str(mrb, mrb_funcall_id(mrb, mrb_obj_value(mrb_class_get_id(mrb, MRB_SYM(Pq))), MRB_SYM(encode_rational), 1, value));
+      mrb_gc_protect(mrb, str);
+      *paramType = 0;
+      *paramLength = RSTRING_LEN(str);
+      *paramFormat = 0;
+      return RSTRING_PTR(str);
+    } break;
+#endif
+    case MRB_TT_HASH: {
+      /* refuse rather than silently sending Hash#inspect text; serialize
+         it yourself (e.g. to JSON) when that's what you mean */
+      mrb_raise(mrb, E_TYPE_ERROR, "cannot encode a Hash parameter — serialize it yourself");
+    } break;
     default: {
+      if (mrb_pq_time_p(mrb, value)) {
+        mrb_value str = mrb_pq_time_text(mrb, value);
+        mrb_gc_protect(mrb, str);
+        *paramType = 1184; /* timestamptz */
+        *paramLength = RSTRING_LEN(str);
+        *paramFormat = 0;
+        return RSTRING_PTR(str);
+      }
       value = mrb_str_to_str(mrb, value);
+      mrb_gc_protect(mrb, value);
       *paramType = 0;
       *paramLength = RSTRING_LEN(value);
       *paramFormat = 0;
@@ -1074,10 +1307,7 @@ mrb_PQftable(mrb_state *mrb, mrb_value self)
 
   Oid foo = PQftable((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number);
   if (foo == InvalidOid) {
-    /* Result::* error classes are MRB_TT_DATA (they wrap a PGresult when
-       returned as error results) and mruby cannot raise TT_DATA objects —
-       raise the plain, catchable Pq::InvalidOidError instead. */
-    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_class_get_id(mrb, MRB_SYM(Pq)), MRB_SYM(InvalidOidError)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
+    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(InvalidOid)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
   return mrb_int_value(mrb, foo);
@@ -1092,7 +1322,7 @@ mrb_PQftablecol(mrb_state *mrb, mrb_value self)
 
   int foo = PQftablecol((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number);
   if (foo == 0) {
-    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_class_get_id(mrb, MRB_SYM(Pq)), MRB_SYM(InvalidOidError)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
+    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(InvalidOid)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
   return mrb_int_value(mrb, foo);
@@ -1142,31 +1372,71 @@ mrb_PQftype(mrb_state *mrb, mrb_value self)
   return mrb_int_value(mrb, PQftype((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number));
 }
 
+/* =====================================================================
+ * Typed text decoding: one scalar decoder keyed by type OID, shared by
+ * whole columns and by array elements. Anything that fails to parse
+ * falls back to the raw text — decoding never raises.
+ * ===================================================================== */
+
+/* numeric — PostgreSQL's exact decimal, decoded exactly and entirely
+ * with mruby's own converters: mrb_str_to_integer (the built-in behind
+ * Kernel#Integer, bigint-capable) for the digits, 10 ** scale and
+ * Rational() for the fraction. NaN and +-Infinity live in Float, their
+ * only home. Cast ::float8 in SQL when an approximate Float is wanted. */
 static mrb_value
-mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number, int column_number, char *value)
+mrb_pq_decode_numeric(mrb_state *mrb, const char *value, mrb_int len)
 {
-  switch(PQftype(result, column_number)) {
+#ifndef MRB_WITHOUT_FLOAT
+  if (strcmp(value, "NaN") == 0)       return mrb_float_value(mrb, (mrb_float)NAN);
+  if (strcmp(value, "Infinity") == 0)  return mrb_float_value(mrb, (mrb_float)INFINITY);
+  if (strcmp(value, "-Infinity") == 0) return mrb_float_value(mrb, (mrb_float)-INFINITY);
+#endif
+  const char *dot = strchr(value, '.');
+  if (!dot) {
+    return mrb_str_to_integer(mrb, mrb_str_new(mrb, value, len), 10, FALSE);
+  }
+#ifdef MRB_USE_RATIONAL
+  /* mantissa: the digits with the dot removed; value = mantissa / 10^scale */
+  mrb_value digits = mrb_str_new(mrb, value, dot - value);
+  mrb_str_cat(mrb, digits, dot + 1, value + len - (dot + 1));
+  mrb_value mantissa = mrb_str_to_integer(mrb, digits, 10, FALSE);
+  mrb_value den = mrb_funcall_id(mrb, mrb_int_value(mrb, 10), MRB_OPSYM(pow), 1,
+                                 mrb_int_value(mrb, (mrb_int)(value + len - (dot + 1))));
+  return mrb_funcall_id(mrb, mrb_top_self(mrb), MRB_SYM(Rational), 2, mantissa, den);
+#else
+  return mrb_str_new(mrb, value, len);
+#endif
+}
+
+static mrb_value
+mrb_pq_decode_scalar_text(mrb_state *mrb, Oid type, const char *value, mrb_int len)
+{
+  switch(type) {
     case 16: { // bool
       return mrb_bool_value(value[0] == 't');
     } break;
     case 20: { // int64_t
-      return mrb_int_value(mrb, strtoll(value, NULL, 0));
+      return mrb_int_value(mrb, strtoll(value, NULL, 10));
     } break;
     case 23: // int32_t
     case 21: // int16_t
-      return mrb_int_value(mrb, strtol(value, NULL, 0));
+    case 26: // oid
+      return mrb_int_value(mrb, strtol(value, NULL, 10));
     break;
     case 114:
     case 3802: {
       if (mrb_class_defined_id(mrb, MRB_SYM(JSON))) {
-        return mrb_funcall_id(mrb, mrb_obj_value(mrb_module_get_id(mrb, MRB_SYM(JSON))), MRB_SYM(parse), 1, mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number)));
+        /* parse or load, whichever the loaded JSON module has */
+        mrb_value json_mod = mrb_obj_value(mrb_module_get_id(mrb, MRB_SYM(JSON)));
+        mrb_sym meth = mrb_respond_to(mrb, json_mod, MRB_SYM(parse)) ? MRB_SYM(parse) : MRB_SYM(load);
+        return mrb_funcall_id(mrb, json_mod, meth, 1, mrb_str_new(mrb, value, len));
       } else {
         goto def;
       }
     } break;
     case 142: {
       if (mrb_class_defined_id(mrb, MRB_SYM(XML))) {
-        return mrb_funcall_id(mrb, mrb_obj_value(mrb_module_get_id(mrb, MRB_SYM(XML))), MRB_SYM(parse), 1, mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number)));
+        return mrb_funcall_id(mrb, mrb_obj_value(mrb_module_get_id(mrb, MRB_SYM(XML))), MRB_SYM(parse), 1, mrb_str_new(mrb, value, len));
       } else {
         goto def;
       }
@@ -1178,14 +1448,50 @@ mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number,
 #ifndef MRB_USE_FLOAT
     case 701: { // double
       return mrb_float_value(mrb, strtod(value, NULL));
-#endif
     } break;
 #endif
+#endif
+    case 1700: { /* numeric — exact decimal, decoded exactly (see
+                    mrb_pq_decode_numeric) */
+      return mrb_pq_decode_numeric(mrb, value, len);
+    } break;
+    case 1082:   /* date        -> Time at UTC midnight */
+    case 1114:   /* timestamp   -> Time, interpreted as UTC */
+    case 1184: { /* timestamptz -> Time, offset applied  */
+      /* parsing lives in Ruby (Pq.decode_datetime, mrblib/pq.rb) — nil
+         means Time can't hold it and the canonical text wins */
+      mrb_value t = mrb_funcall_id(mrb, mrb_obj_value(mrb_class_get_id(mrb, MRB_SYM(Pq))), MRB_SYM(decode_datetime), 1, mrb_str_new(mrb, value, len));
+      if (!mrb_nil_p(t)) return t;
+      goto def;
+    } break;
+    case 17: { // bytea -> binary String, via libpq's own converter
+      size_t bin_len;
+      unsigned char *bin = PQunescapeBytea((const unsigned char *)value, &bin_len);
+      if (bin) {
+        mrb_value out = mrb_str_new(mrb, (const char *)bin, (mrb_int)bin_len);
+        PQfreemem(bin);
+        return out;
+      }
+      goto def;
+    } break;
+    case 2278: { // void
+      return mrb_nil_value();
+    } break;
     default: {
 def:
-      return mrb_str_new(mrb, value, PQgetlength(result, row_number, column_number));
+      /* everything else — uuid, inet, interval, money, enums, ranges,
+         arrays, ... — is PostgreSQL's canonical text; res.ftype says what
+         it is, and PostgreSQL converts on request (unnest, to_jsonb) */
+      return mrb_str_new(mrb, value, len);
     }
   }
+}
+
+static mrb_value
+mrb_pq_decode_text_value(mrb_state *mrb, const PGresult *result, int row_number, int column_number, char *value)
+{
+  return mrb_pq_decode_scalar_text(mrb, PQftype(result, column_number), value,
+                                   PQgetlength(result, row_number, column_number));
 }
 
 static mrb_value
@@ -1264,9 +1570,6 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_const_id(mrb, pq_class, MRB_SYM(InvalidOid), mrb_int_value(mrb, InvalidOid));
   pq_error_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Error), E_RUNTIME_ERROR);
   mrb_define_class_under_id(mrb, pq_class, MRB_SYM(ConnectionError), pq_error_class);
-  /* raisable sibling of the (TT_DATA, unraisable) Pq::Result::InvalidOid:
-     what ftable/ftablecol raise when a column has no source table */
-  mrb_define_class_under_id(mrb, pq_class, MRB_SYM(InvalidOidError), pq_error_class);
   mrb_define_method_id(mrb, pq_class, MRB_SYM(initialize), mrb_PQconnectdb, MRB_ARGS_OPT(1));
   mrb_define_method_id(mrb, pq_class, MRB_SYM(finish), mrb_PQfinish, MRB_ARGS_NONE());
   mrb_define_alias_id(mrb, pq_class, MRB_SYM(close), MRB_SYM(finish));

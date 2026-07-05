@@ -448,9 +448,199 @@ assert("ftable_oid / ftablecol_num return libpq's raw answers, never raise") do
 
   assert_equal Pq::InvalidOid, res.ftable_oid(1)     # computed: defined answer...
   assert_equal 0, res.ftablecol_num(1)
-  assert_raise(Pq::InvalidOidError) { res.ftable(1) } # ...where ftable raises
-  assert_raise(Pq::InvalidOidError) { res.ftablecol(1) }
+  assert_raise(Pq::Result::InvalidOid) { res.ftable(1) } # ...where ftable raises
+  assert_raise(Pq::Result::InvalidOid) { res.ftablecol(1) }
 
   assert_equal 0, Pq::InvalidOid                     # libpq's sentinel value
+  conn.close
+end
+
+# ===========================================================================
+# Type inference — decode (server -> Ruby)
+# ===========================================================================
+
+assert("decode: numeric is exact — Integer / Rational / Float specials") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  # integral numeric -> Integer (trailing zeros carry no value)
+  assert_equal [[42]], conn.exec("select 42::numeric").to_ary
+  assert_equal [[-7]], conn.exec("select '-7.00'::numeric").to_ary
+  # fractional -> Rational, exact
+  assert_equal [[Rational(3, 2)]], conn.exec("select 1.5::numeric").to_ary
+  assert_equal [[Rational(-1, 4)]], conn.exec("select '-0.25'::numeric").to_ary
+  assert_equal [[Rational(1999, 100)]], conn.exec("select 19.99::numeric").to_ary
+  # beyond int64: bigint keeps it exact
+  big = "123456789012345678901234567890"
+  assert_equal big, conn.exec("select '#{big}'::numeric").getvalue(0, 0).to_s
+  assert_equal Rational("#{big}5".to_i, 10), conn.exec("select ('#{big}' || '.5')::numeric").getvalue(0, 0)
+  # specials only Float can carry
+  assert_true conn.exec("select 'NaN'::numeric").getvalue(0, 0).nan?
+  assert_equal [[Float::INFINITY]], conn.exec("select 'Infinity'::numeric").to_ary
+  conn.close
+end
+
+assert("decode: oid becomes Integer") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[42]], conn.exec("select 42::oid").to_ary
+  conn.close
+end
+
+assert("decode: date becomes Time at UTC midnight") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  t = conn.exec("select '2026-07-05'::date").getvalue(0, 0)
+  assert_kind_of Time, t
+  assert_equal [2026, 7, 5, 0, 0, 0], [t.year, t.month, t.day, t.hour, t.min, t.sec]
+  assert_true t.utc?
+  conn.close
+end
+
+assert("decode: timestamp is interpreted as UTC") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  t = conn.exec("select '2026-07-05 12:34:56.123456'::timestamp").getvalue(0, 0)
+  assert_kind_of Time, t
+  assert_equal [12, 34, 56, 123456], [t.hour, t.min, t.sec, t.usec]
+  conn.close
+end
+
+assert("decode: timestamptz applies the offset") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  t = conn.exec("select '2026-07-05 14:00:00+02'::timestamptz").getvalue(0, 0)
+  assert_kind_of Time, t
+  assert_equal 12, t.hour   # 14:00+02 == 12:00 UTC
+  conn.close
+end
+
+assert("decode: dates PostgreSQL understands but Time cannot fall back to text") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [["infinity"]], conn.exec("select 'infinity'::timestamp").to_ary
+  bc = conn.exec("select '0044-03-15 BC'::date").getvalue(0, 0)
+  assert_kind_of String, bc
+  conn.close
+end
+
+assert("decode: bytea becomes a binary String") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  v = conn.exec("select '\\xdeadbeef'::bytea").getvalue(0, 0)
+  assert_equal 4, v.length
+  assert_equal "\xde\xad\xbe\xef", v
+  conn.close
+end
+
+assert("decode: void becomes nil") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_nil conn.exec("select pg_sleep(0)").getvalue(0, 0)
+  conn.close
+end
+
+assert("decode: arrays stay canonical text — unnest/to_jsonb in SQL for structure") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal "{1,2,NULL}", conn.exec("select '{1,2,NULL}'::int8[]").getvalue(0, 0)
+  assert_equal [[1], [2]], conn.exec("select unnest('{1,2}'::int8[])").to_ary
+  conn.close
+end
+
+
+assert("decode: timestamptz array elements via unnest") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  v = conn.exec("select unnest(array['2026-07-05 14:00:00+02'::timestamptz])").getvalue(0, 0)
+  assert_kind_of Time, v
+  assert_equal 12, v.hour
+  conn.close
+end
+
+assert("decode: types without a Ruby counterpart stay canonical text") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_kind_of String, conn.exec("select '1 day'::interval").getvalue(0, 0)
+  assert_kind_of String, conn.exec("select '192.168.0.1/24'::inet").getvalue(0, 0)
+  assert_kind_of String, conn.exec("select '12:34:56'::time").getvalue(0, 0)
+  assert_equal "b719928c-9398-4a2f-9d59-13fc4675bf00",
+    conn.exec("select 'B719928C-9398-4A2F-9D59-13FC4675BF00'::uuid").getvalue(0, 0)
+  conn.close
+end
+
+# ===========================================================================
+# Type inference — encode (Ruby -> parameters)
+# ===========================================================================
+
+assert("encode: Symbol is sent as text, :NULL as SQL NULL") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [["hello"]], conn.exec("select $1::text", :hello).to_ary
+  assert_equal [[true]], conn.exec("select $1::int4 is null", :NULL).to_ary
+  conn.close
+end
+
+assert("encode: Time round-trips through timestamptz with microseconds") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  t = Time.at(1783123456, 654321).utc
+  back = conn.exec("select $1", t).getvalue(0, 0)
+  assert_kind_of Time, back
+  assert_equal t.to_i, back.to_i
+  assert_equal t.usec, back.usec
+  conn.close
+end
+
+assert("encode: integer Array becomes an int8[] parameter") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[true]], conn.exec("select $1 = '{1,2,3}'::int8[]", [1, 2, 3]).to_ary
+  assert_equal [[true]], conn.exec("select 2 = any($1)", [1, 2, 3]).to_ary
+  conn.close
+end
+
+assert("encode: string Array quotes and escapes correctly") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  v = ["a,b", "c\"d", "e\\f", "NULL"]
+  assert_equal [[4]], conn.exec("select array_length($1::text[], 1)", v).to_ary
+  assert_equal [[v[1]]], conn.exec("select ($1::text[])[2]", v).to_ary
+  conn.close
+end
+
+assert("encode: nested Array becomes multidimensional") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[true]], conn.exec("select $1 = '{{1,2},{3,4}}'::int8[]", [[1, 2], [3, 4]]).to_ary
+  conn.close
+end
+
+assert("encode: nil elements and empty arrays") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[true]], conn.exec("select $1 = '{1,NULL,3}'::int8[]", [1, nil, 3]).to_ary
+  assert_equal [[true]], conn.exec("select $1::int4[] = '{}'", []).to_ary
+  conn.close
+end
+
+assert("encode: bool and float arrays infer their types") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[true]], conn.exec("select $1 = '{t,f}'::bool[]", [true, false]).to_ary
+  assert_equal [[true]], conn.exec("select $1 = '{1.5,2.5}'::float8[]", [1.5, 2.5]).to_ary
+  conn.close
+end
+
+assert("encode: Time inside arrays") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  t = Time.at(1783123456, 0).utc
+  back = conn.exec("select ($1::timestamptz[])[1]", [t]).getvalue(0, 0)
+  assert_kind_of Time, back
+  assert_equal t.to_i, back.to_i
+  conn.close
+end
+
+assert("encode: Hash is not encoded — serialize JSON yourself") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_raise(TypeError) { conn.exec("select $1", {"a" => 1}) }
+  conn.close
+end
+
+assert("encode: Rational round-trips exactly through numeric") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[Rational(3, 2)]], conn.exec("select $1::numeric", Rational(3, 2)).to_ary
+  assert_equal [[Rational(-1999, 100)]], conn.exec("select $1::numeric", Rational(-1999, 100)).to_ary
+  assert_equal [[5]], conn.exec("select $1::numeric", Rational(5, 1)).to_ary
+  assert_equal [[true]], conn.exec("select $1::numeric = 0.045", Rational(9, 200)).to_ary
+  conn.close
+end
+
+assert("encode: non-terminating Rational matches PostgreSQL's own division") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  assert_equal [[true]], conn.exec("select $1::numeric = 1::numeric / 3", Rational(1, 3)).to_ary
+  assert_equal [[true]], conn.exec("select $1::numeric = 2::numeric / 3", Rational(2, 3)).to_ary
+  assert_equal [[true]], conn.exec("select $1::numeric = -1::numeric / 3", Rational(-1, 3)).to_ary
   conn.close
 end

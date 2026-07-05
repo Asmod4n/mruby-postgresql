@@ -3,6 +3,12 @@ MRuby::Gem::Specification.new('mruby-postgresql') do |spec|
   spec.author  = 'Hendrik Beskow'
   spec.summary = 'Postgresql adapter for mruby'
   spec.add_dependency 'mruby-errno'
+  # exact numeric decoding: integral -> Integer (arbitrary size),
+  # fractional -> Rational — never a lossy Float behind the user's back
+  spec.add_dependency 'mruby-bigint',   core: 'mruby-bigint'
+  spec.add_dependency 'mruby-rational', core: 'mruby-rational'
+  # date/timestamp/timestamptz <-> Time, always UTC
+  spec.add_dependency 'mruby-time',     core: 'mruby-time'
   spec.add_dependency 'mruby-symbol-ext'
   spec.add_dependency 'mruby-metaprog'
 
