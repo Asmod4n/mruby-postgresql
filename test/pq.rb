@@ -436,3 +436,26 @@ assert("Result#error_message returns the full server message") do
   assert_equal "", conn.exec("SELECT 1").error_message
   conn.close
 end
+
+assert("ftable_oid / ftablecol_num return libpq's raw answers, never raise") do
+  conn = Pq.new("postgresql://localhost/postgres")
+  conn.exec("create temp table ftable_raw_t (id int4)")
+  res = conn.exec("select id, 1 as computed from ftable_raw_t")
+
+  assert_true res.ftable_oid(0) > 0                  # a real table's oid
+  assert_equal res.ftable_oid(0), res.ftable(0)      # agrees with the raising form
+  assert_equal 1, res.ftablecol_num(0)               # first column of the table
+
+  assert_equal Pq::InvalidOid, res.ftable_oid(1)     # computed: defined answer...
+  assert_equal 0, res.ftablecol_num(1)
+  raised = false                                     # ...where ftable raises
+  begin
+    res.ftable(1)
+  rescue Exception
+    raised = true
+  end
+  assert_true raised
+
+  assert_equal 0, Pq::InvalidOid                     # libpq's sentinel value
+  conn.close
+end

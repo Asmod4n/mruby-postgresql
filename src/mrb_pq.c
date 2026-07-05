@@ -1095,6 +1095,30 @@ mrb_PQftablecol(mrb_state *mrb, mrb_value self)
   return mrb_int_value(mrb, foo);
 }
 
+/* Like ftable / ftablecol, but 1:1 with libpq: return whatever PQftable /
+ * PQftablecol answer, never raise. InvalidOid (Pq::InvalidOid) respectively
+ * 0 mean "not a simple reference to a table column" — a defined answer for
+ * computed columns, not an error. */
+static mrb_value
+mrb_PQftable_oid(mrb_state *mrb, mrb_value self)
+{
+  mrb_int column_number;
+  mrb_get_args(mrb, "i", &column_number);
+  mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
+
+  return mrb_int_value(mrb, PQftable((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number));
+}
+
+static mrb_value
+mrb_PQftablecol_num(mrb_state *mrb, mrb_value self)
+{
+  mrb_int column_number;
+  mrb_get_args(mrb, "i", &column_number);
+  mrb_assert_int_fit(mrb_int, column_number, int, INT_MAX);
+
+  return mrb_int_value(mrb, PQftablecol((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number));
+}
+
 static mrb_value
 mrb_PQfformat(mrb_state *mrb, mrb_value self)
 {
@@ -1232,6 +1256,9 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   struct RClass *pq_class, *pq_error_class, *pq_result_mixins, *pq_result_class, *pq_result_error_class, *pq_notice_processor_class, *pq_notify_class;
   pq_class = mrb_define_class_id(mrb, MRB_SYM(Pq), mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_class, MRB_TT_DATA);
+  /* libpq's "no such object" sentinel (0): what ftable_oid answers for
+     columns that are not a simple reference to a table column. */
+  mrb_define_const_id(mrb, pq_class, MRB_SYM(InvalidOid), mrb_int_value(mrb, InvalidOid));
   pq_error_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Error), E_RUNTIME_ERROR);
   mrb_define_class_under_id(mrb, pq_class, MRB_SYM(ConnectionError), pq_error_class);
   mrb_define_method_id(mrb, pq_class, MRB_SYM(initialize), mrb_PQconnectdb, MRB_ARGS_OPT(1));
@@ -1297,6 +1324,8 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(fnumber), mrb_PQfnumber, MRB_ARGS_REQ(1));
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(ftable), mrb_PQftable, MRB_ARGS_REQ(1));
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(ftablecol), mrb_PQftablecol, MRB_ARGS_REQ(1));
+  mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(ftable_oid), mrb_PQftable_oid, MRB_ARGS_REQ(1));
+  mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(ftablecol_num), mrb_PQftablecol_num, MRB_ARGS_REQ(1));
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(fformat), mrb_PQfformat, MRB_ARGS_REQ(1));
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(getvalue), mrb_PQgetvalue, MRB_ARGS_REQ(2));
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(getisnull), mrb_PQgetisnull, MRB_ARGS_REQ(2));

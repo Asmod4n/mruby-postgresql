@@ -119,6 +119,11 @@ res.nfields                          # number of columns
 res.fname(column_number)             # column name (0-based)
 res.fnumber(column_name)             # column number for name
 res.ftablecol(column_number)         # column number within its source table
+res.ftable_oid(column_number)        # like ftable, but 1:1 with libpq: returns
+                                     # Pq::InvalidOid instead of raising for
+                                     # computed columns
+res.ftablecol_num(column_number)     # like ftablecol: returns 0 instead of
+                                     # raising
 res.ftype(column_number)             # OID of the column's data type
 res.getvalue(row_number, column_number)    # single field value
 res.getisnull(row_number, column_number)   # true if field is NULL
