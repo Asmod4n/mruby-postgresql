@@ -326,6 +326,12 @@ single-row mode and cannot service the copy protocol.
 | `conn.put_copy_data(data)`            | `PQputCopyData`             |
 | `conn.put_copy_end(message = nil)`    | `PQputCopyEnd`              |
 | `conn.get_copy_data`                  | `PQgetCopyData`             |
+| `conn.transaction_status`             | `PQtransactionStatus`       |
+| `conn.escape_identifier(str)`         | `PQescapeIdentifier`        |
+| `conn.escape_literal(str)`            | `PQescapeLiteral`           |
+| `res.cmd_status`                      | `PQcmdStatus`               |
+| `res.cmd_tuples`                      | `PQcmdTuples`               |
+| `res.error_message`                   | `PQresultErrorMessage`      |
 
 `connect_poll` returns `:reading`, `:writing`, `:ok`, or `:failed`. (libpq
 also defines a deprecated `:active` state; the gem exposes it for
@@ -335,3 +341,24 @@ completeness but it never appears on modern libpq.)
 lowercase: `:ok`, `:bad`, `:started`, `:made`, `:awaiting_response`,
 `:auth_ok`, `:setenv`, `:ssl_startup`, `:needed`. Newer libpq states fall
 through to the underlying integer.
+
+Building tools on top (migrations etc.)
+---------------------------------------
+Higher-level concerns like schema migrations are deliberately **not** part
+of this gem — they belong in a database-agnostic gem that drives multiple
+backends (PostgreSQL, SQLite, MySQL, ...) through per-backend adapters.
+This gem exposes the primitives such an adapter needs:
+
+- `conn.exec(sql, *params)` — parameterized execution; errors come back as
+  result objects with full diagnostics (`sqlstate`, `error_message`, ...)
+- transactions are plain SQL (`BEGIN` / `COMMIT` / `ROLLBACK`), and
+  `conn.transaction_status` reports where the connection stands:
+  `:idle`, `:active`, `:intrans` (in a transaction), `:inerror` (in an
+  aborted transaction), `:unknown`
+- `conn.escape_identifier(name)` / `conn.escape_literal(value)` — libpq's
+  own quoting for the places `$1` parameters cannot go (dynamic table
+  names, DDL)
+- `res.cmd_tuples` — rows affected by INSERT/UPDATE/DELETE (`nil` when the
+  command reports no count), `res.cmd_status` — the command tag
+- `res.error_message` — the full server error message of a result
+  (`Exception#message` cannot read it on these data-wrapped objects)

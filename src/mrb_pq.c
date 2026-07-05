@@ -856,6 +856,97 @@ mrb_PQgetCopyData_m(mrb_state *mrb, mrb_value self)
  * end async-aware additions (query execution)
  * =================================================================== */
 
+/* ===================================================================
+ * Primitives for tooling built on top (migration gems etc.)
+ * =================================================================== */
+
+static mrb_value
+mrb_PQtransactionStatus_m(mrb_state *mrb, mrb_value self)
+{
+  const PGconn *conn = (const PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  switch (PQtransactionStatus(conn)) {
+    case PQTRANS_IDLE:    return mrb_symbol_value(MRB_SYM(idle));
+    case PQTRANS_ACTIVE:  return mrb_symbol_value(MRB_SYM(active));
+    case PQTRANS_INTRANS: return mrb_symbol_value(MRB_SYM(intrans));
+    case PQTRANS_INERROR: return mrb_symbol_value(MRB_SYM(inerror));
+    default:              return mrb_symbol_value(MRB_SYM(unknown));
+  }
+}
+
+/* PQescapeIdentifier / PQescapeLiteral both return a freshly malloc'd,
+   NUL-terminated string (or NULL on error); build the mruby string under
+   mrb_protect_error so PQfreemem is guaranteed, like the COPY row path. */
+static mrb_value
+mrb_pq_escape(mrb_state *mrb, mrb_value self, char *(*escape)(PGconn *, const char *, size_t))
+{
+  const char *str;
+  mrb_int len;
+  mrb_get_args(mrb, "s", &str, &len);
+  PGconn *conn = (PGconn *) mrb_data_check_get_ptr(mrb, self, &mrb_PGconn_type);
+  if (!conn) {
+    mrb_raise(mrb, E_IO_ERROR, "closed stream");
+  }
+
+  errno = 0;
+  char *quoted = escape(conn, str, (size_t) len);
+  if (unlikely(!quoted)) {
+    mrb_pq_handle_connection_error(mrb, self, conn);
+  }
+
+  mrb_pq_copy_row_arg arg = { .buffer = quoted, .len = (int) strlen(quoted) };
+  mrb_bool err = FALSE;
+  mrb_value ret = mrb_protect_error(mrb, mrb_pq_copy_row_build, &arg, &err);
+  PQfreemem(quoted);
+  if (err) mrb_exc_raise(mrb, ret);
+  return ret;
+}
+
+static mrb_value
+mrb_PQescapeIdentifier_m(mrb_state *mrb, mrb_value self)
+{
+  return mrb_pq_escape(mrb, self, PQescapeIdentifier);
+}
+
+static mrb_value
+mrb_PQescapeLiteral_m(mrb_state *mrb, mrb_value self)
+{
+  return mrb_pq_escape(mrb, self, PQescapeLiteral);
+}
+
+static mrb_value
+mrb_PQcmdStatus_m(mrb_state *mrb, mrb_value self)
+{
+  PGresult *result = (PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type);
+  return mrb_str_new_cstr(mrb, PQcmdStatus(result));
+}
+
+static mrb_value
+mrb_PQcmdTuples_m(mrb_state *mrb, mrb_value self)
+{
+  PGresult *result = (PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type);
+  const char *tuples = PQcmdTuples(result);
+  if (tuples[0] == '\0') {
+    /* the command doesn't report a row count (CREATE TABLE, BEGIN, ...) */
+    return mrb_nil_value();
+  }
+  return mrb_int_value(mrb, (mrb_int) strtoll(tuples, NULL, 10));
+}
+
+static mrb_value
+mrb_PQresultErrorMessage_m(mrb_state *mrb, mrb_value self)
+{
+  const PGresult *result = (const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type);
+  return mrb_str_new_cstr(mrb, PQresultErrorMessage(result));
+}
+
+/* ===================================================================
+ * end primitives for tooling
+ * =================================================================== */
+
 typedef struct {
   mrb_PQnoticeReceiver_arg *cb;
   PGresult *copy;
@@ -1180,6 +1271,9 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method_id(mrb, pq_class, MRB_SYM(put_copy_data), mrb_PQputCopyData_m, MRB_ARGS_REQ(1));
   mrb_define_method_id(mrb, pq_class, MRB_SYM(put_copy_end), mrb_PQputCopyEnd_m, MRB_ARGS_OPT(1));
   mrb_define_method_id(mrb, pq_class, MRB_SYM(get_copy_data), mrb_PQgetCopyData_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(transaction_status), mrb_PQtransactionStatus_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(escape_identifier), mrb_PQescapeIdentifier_m, MRB_ARGS_REQ(1));
+  mrb_define_method_id(mrb, pq_class, MRB_SYM(escape_literal), mrb_PQescapeLiteral_m, MRB_ARGS_REQ(1));
   /* Pq::Notify is fleshed out in mrblib/pq.rb; defined here so that
      mrb_class_get_under_id always finds it. */
   pq_notify_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Notify), mrb->object_class);
@@ -1209,6 +1303,9 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(nparams), mrb_PQnparams, MRB_ARGS_NONE());
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(paramtype), mrb_PQparamtype, MRB_ARGS_REQ(1));
   mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(ftype), mrb_PQftype, MRB_ARGS_REQ(1));
+  mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(cmd_status), mrb_PQcmdStatus_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(cmd_tuples), mrb_PQcmdTuples_m, MRB_ARGS_NONE());
+  mrb_define_method_id(mrb, pq_result_mixins, MRB_SYM(error_message), mrb_PQresultErrorMessage_m, MRB_ARGS_NONE());
   pq_result_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Result), mrb->object_class);
   MRB_SET_INSTANCE_TT(pq_result_class, MRB_TT_DATA);
   mrb_include_module(mrb, pq_result_class, pq_result_mixins);
