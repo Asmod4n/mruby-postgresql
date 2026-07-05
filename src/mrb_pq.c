@@ -291,7 +291,7 @@ static mrb_value
 mrb_pq_each_row_body(mrb_state *mrb, void *arg_)
 {
   mrb_pq_each_row_arg *arg = (mrb_pq_each_row_arg *) arg_;
-  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  int arena_index = mrb_gc_arena_save(mrb);
   PGresult *res;
 
   while ((res = PQgetResult(arg->conn))) {
@@ -382,7 +382,7 @@ mrb_PQexec(mrb_state *mrb, mrb_value self)
   const char **paramValues = NULL;
   int        *paramLengths = NULL;
   int        *paramFormats = NULL;
-  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  int arena_index = mrb_gc_arena_save(mrb);
   mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
     &paramTypes, &paramValues, &paramLengths, &paramFormats);
 
@@ -450,7 +450,7 @@ mrb_PQexecPrepared(mrb_state *mrb, mrb_value self)
   const char **paramValues = NULL;
   int        *paramLengths = NULL;
   int        *paramFormats = NULL;
-  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  int arena_index = mrb_gc_arena_save(mrb);
   mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
     &paramTypes, &paramValues, &paramLengths, &paramFormats);
 
@@ -562,7 +562,7 @@ mrb_PQsendQuery_m(mrb_state *mrb, mrb_value self)
   const char **paramValues = NULL;
   int        *paramLengths = NULL;
   int        *paramFormats = NULL;
-  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  int arena_index = mrb_gc_arena_save(mrb);
   mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
     &paramTypes, &paramValues, &paramLengths, &paramFormats);
 
@@ -611,7 +611,7 @@ mrb_PQsendQueryPrepared_m(mrb_state *mrb, mrb_value self)
   const char **paramValues = NULL;
   int        *paramLengths = NULL;
   int        *paramFormats = NULL;
-  mrb_int arena_index = mrb_gc_arena_save(mrb);
+  int arena_index = mrb_gc_arena_save(mrb);
   mrb_bool has_params = mrb_pq_encode_params(mrb, paramValues_val, nParams,
     &paramTypes, &paramValues, &paramLengths, &paramFormats);
 
@@ -976,7 +976,7 @@ mrb_PQnoticeReceiver(void *arg_, const PGresult *res)
   PGresult *copy = PQcopyResult(res, 0);
   if (!copy) return;  /* OOM — drop the notice; libpq frees `res` for us */
 
-  mrb_int arena_index = mrb_gc_arena_save(arg->mrb);
+  int arena_index = mrb_gc_arena_save(arg->mrb);
   /* mrb_yield must not raise across libpq's C stack. Wrap it; if the
      user's block raises, park the exception in mrb->exc and return.
      The mruby C wrapper that drove this libpq call (mrb_PQexec,
