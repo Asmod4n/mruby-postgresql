@@ -448,13 +448,8 @@ assert("ftable_oid / ftablecol_num return libpq's raw answers, never raise") do
 
   assert_equal Pq::InvalidOid, res.ftable_oid(1)     # computed: defined answer...
   assert_equal 0, res.ftablecol_num(1)
-  raised = false                                     # ...where ftable raises
-  begin
-    res.ftable(1)
-  rescue Exception
-    raised = true
-  end
-  assert_true raised
+  assert_raise(Pq::InvalidOidError) { res.ftable(1) } # ...where ftable raises
+  assert_raise(Pq::InvalidOidError) { res.ftablecol(1) }
 
   assert_equal 0, Pq::InvalidOid                     # libpq's sentinel value
   conn.close

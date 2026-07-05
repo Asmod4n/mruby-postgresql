@@ -1074,7 +1074,10 @@ mrb_PQftable(mrb_state *mrb, mrb_value self)
 
   Oid foo = PQftable((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number);
   if (foo == InvalidOid) {
-    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(InvalidOid)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
+    /* Result::* error classes are MRB_TT_DATA (they wrap a PGresult when
+       returned as error results) and mruby cannot raise TT_DATA objects —
+       raise the plain, catchable Pq::InvalidOidError instead. */
+    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_class_get_id(mrb, MRB_SYM(Pq)), MRB_SYM(InvalidOidError)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
   return mrb_int_value(mrb, foo);
@@ -1089,7 +1092,7 @@ mrb_PQftablecol(mrb_state *mrb, mrb_value self)
 
   int foo = PQftablecol((const PGresult *) mrb_data_check_get_ptr(mrb, self, &mrb_PGresult_type), (int) column_number);
   if (foo == 0) {
-    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_obj_class(mrb, self), MRB_SYM(Error)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
+    mrb_raise(mrb, mrb_class_get_under_id(mrb, mrb_class_get_id(mrb, MRB_SYM(Pq)), MRB_SYM(InvalidOidError)), "Column number is out of range, or the specified column is not a simple reference to a table column, or using pre-3.0 protocol");
   }
 
   return mrb_int_value(mrb, foo);
@@ -1261,6 +1264,9 @@ mrb_mruby_postgresql_gem_init(mrb_state *mrb)
   mrb_define_const_id(mrb, pq_class, MRB_SYM(InvalidOid), mrb_int_value(mrb, InvalidOid));
   pq_error_class = mrb_define_class_under_id(mrb, pq_class, MRB_SYM(Error), E_RUNTIME_ERROR);
   mrb_define_class_under_id(mrb, pq_class, MRB_SYM(ConnectionError), pq_error_class);
+  /* raisable sibling of the (TT_DATA, unraisable) Pq::Result::InvalidOid:
+     what ftable/ftablecol raise when a column has no source table */
+  mrb_define_class_under_id(mrb, pq_class, MRB_SYM(InvalidOidError), pq_error_class);
   mrb_define_method_id(mrb, pq_class, MRB_SYM(initialize), mrb_PQconnectdb, MRB_ARGS_OPT(1));
   mrb_define_method_id(mrb, pq_class, MRB_SYM(finish), mrb_PQfinish, MRB_ARGS_NONE());
   mrb_define_alias_id(mrb, pq_class, MRB_SYM(close), MRB_SYM(finish));
